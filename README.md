@@ -10,44 +10,76 @@ VARIABLES - WHAT THEY DO & WHAT THEY AFFECT
 
 Low-Level Panel 1 Variables:
 ----------------------------
-updateInterval               - How often (seconds) to send player updates. Lower = smoother, but uses more bandwidth. Affects all sync timing and smoothing. Interacts with inputSmoothing, baseInterpTime, baseJitterBufferDelay.
-positionTolerance            - How far a player can drift before correction. Affects correction frequency. Interacts with teleportThreshold, maxCorrectionDistance, desyncToleranceMultiplier.
-rotationTolerance            - How much rotation error allowed before snapping/correcting. Affects correction frequency. Interacts with correctionAggressiveness.
-teleportThreshold            - Distance before a full teleport correction. Handles major desync/jitter. Interacts with positionTolerance, maxCorrectionDistance.
-initialMoveDelay             - Delay before first move update after spawn. Affects spawn movement.
-initialCorrectGracePeriod    - Time after spawn before corrections can happen. Affects initial smoothness.
-movementThreshold            - Minimum movement before sending an update. Affects update rate. Interacts with minMoveDistance.
-minMoveDistance              - Smallest movement to send/correct. Affects correction sensitivity. Interacts with movementThreshold.
-minRotationAngle             - Smallest rotation to send/correct. Affects update/correction sensitivity. Interacts with rotationTolerance.
-inputSmoothing               - Smoothing factor for local input. Affects local movement feel. Interacts with updateInterval, baseInterpTime.
-baseInterpTime               - Base time for interpolating between remote updates. Affects smoothing, lag feel. Interacts with updateInterval, minInterpTime, basePredictionFactor.
-minInterpTime                - Minimum interpolation time. Sets lower smoothing bound. Interacts with baseInterpTime.
-rotationDamping              - Damping for smoothing rotations. Affects how soft/hard rotations feel. Interacts with rotationTolerance, baseInterpTime.
-basePredictionFactor         - Base prediction/extrapolation factor. Affects how much the system predicts. Interacts with baseInterpTime, extrapolationLimiter, maxExtrapolationTime.
-baseVelocitySmoothing        - Smoothness of velocity blending for remotes. Affects remote movement sharpness. Interacts with velocityPredictionDamping.
-velocityPredictionDamping    - Damping when blending predicted/actual velocity. Affects smoothness. Interacts with baseVelocitySmoothing.
-extrapolationLimiter         - Limits maximum extrapolation. Controls how wild predictions can get. Interacts with basePredictionFactor, maxExtrapolationTime.
-baseCorrectionSmoothing      - How fast corrections are applied. Higher is slower/smoother. Interacts with correctionAggressiveness, correctionDamping.
-desyncCorrectionTime         - How long before major desync triggers correction. Affects delay of corrections. Interacts with reCorrectionDelay, maxCorrectionDistance.
-baseJitterBufferDelay        - How much time to buffer network packets to smooth out jitter. Affects lag smoothing. Interacts with updateInterval, minStateBufferSize, maxStateBufferSize.
-minStateBufferSize           - Minimum number of state buffers for interpolation. Affects smoothing. Interacts with maxStateBufferSize, baseJitterBufferDelay.
-maxStateBufferSize           - Maximum number of state buffers. Affects smoothing/lag handling. Interacts with minStateBufferSize, baseJitterBufferDelay.
+updateInterval              
+- How often (seconds) to send player updates. Lower = smoother, but uses more bandwidth. Affects all sync timing and smoothing. Interacts with inputSmoothing, baseInterpTime, baseJitterBufferDelay.
+positionTolerance
+- How far a player can drift before correction. Affects correction frequency. Interacts with teleportThreshold, maxCorrectionDistance, desyncToleranceMultiplier.
+rotationTolerance
+ - How much rotation error allowed before snapping/correcting. Affects correction frequency. Interacts with correctionAggressiveness.
+teleportThreshold
+ - Distance before a full teleport correction. Handles major desync/jitter. Interacts with positionTolerance, maxCorrectionDistance.
+initialMoveDelay
+  - Delay before first move update after spawn. Affects spawn movement.
+initialCorrectGracePeriod
+  - Time after spawn before corrections can happen. Affects initial smoothness.
+movementThreshold
+  - Minimum movement before sending an update. Affects update rate. Interacts with minMoveDistance.
+minMoveDistance
+  - Smallest movement to send/correct. Affects correction sensitivity. Interacts with movementThreshold.
+minRotationAngle
+   - Smallest rotation to send/correct. Affects update/correction sensitivity. Interacts with rotationTolerance.
+inputSmoothing
+ - Smoothing factor for local input. Affects local movement feel. Interacts with updateInterval, baseInterpTime.
+baseInterpTime              
+- Base time for interpolating between remote updates. Affects smoothing, lag feel. Interacts with updateInterval, minInterpTime, basePredictionFactor.
+minInterpTime
+  - Minimum interpolation time. Sets lower smoothing bound. Interacts with baseInterpTime.
+rotationDamping
+ - Damping for smoothing rotations. Affects how soft/hard rotations feel. Interacts with rotationTolerance, baseInterpTime.
+basePredictionFactor
+- Base prediction/extrapolation factor. Affects how much the system predicts. Interacts with baseInterpTime, extrapolationLimiter, maxExtrapolationTime.
+baseVelocitySmoothing
+ - Smoothness of velocity blending for remotes. Affects remote movement sharpness. Interacts with velocityPredictionDamping.
+velocityPredictionDamping
+ - Damping when blending predicted/actual velocity. Affects smoothness. Interacts with baseVelocitySmoothing.
+extrapolationLimiter
+ - Limits maximum extrapolation. Controls how wild predictions can get. Interacts with basePredictionFactor, maxExtrapolationTime.
+baseCorrectionSmoothing
+  - How fast corrections are applied. Higher is slower/smoother. Interacts with correctionAggressiveness, correctionDamping.
+desyncCorrectionTime
+  - How long before major desync triggers correction. Affects delay of corrections. Interacts with reCorrectionDelay, maxCorrectionDistance.
+baseJitterBufferDelay
+   - How much time to buffer network packets to smooth out jitter. Affects lag smoothing. Interacts with updateInterval, minStateBufferSize, maxStateBufferSize.
+minStateBufferSize
+  - Minimum number of state buffers for interpolation. Affects smoothing. Interacts with maxStateBufferSize, baseJitterBufferDelay.
+maxStateBufferSize
+ - Maximum number of state buffers. Affects smoothing/lag handling. Interacts with minStateBufferSize, baseJitterBufferDelay.
 
 Low-Level Panel 2 Variables:
 ----------------------------
-maxCorrectionSpeed           - Max speed to correct a desynced player. Controls snap speed. Interacts with baseCorrectionSmoothing, correctionAggressiveness.
-correctionDamping            - Damping for correction. Smooths out large corrections. Interacts with baseCorrectionSmoothing, correctionAggressiveness.
-reCorrectionDelay            - Time before allowing another forced correction. Prevents over-correction. Interacts with desyncCorrectionTime.
-maxExtrapolationTime         - Maximum allowed prediction time. Controls how far prediction can go. Interacts with basePredictionFactor, extrapolationLimiter.
+maxCorrectionSpeed          
+- Max speed to correct a desynced player. Controls snap speed. Interacts with baseCorrectionSmoothing, correctionAggressiveness.
+correctionDamping
+ - Damping for correction. Smooths out large corrections. Interacts with baseCorrectionSmoothing, correctionAggressiveness.
+reCorrectionDelay
+ - Time before allowing another forced correction. Prevents over-correction. Interacts with desyncCorrectionTime.
+maxExtrapolationTime
+- Maximum allowed prediction time. Controls how far prediction can go. Interacts with basePredictionFactor, extrapolationLimiter.
 
 High-Level Panel Variables:
 ---------------------------
-maxCorrectionDistance        - Maximum distance to allow correction before teleporting. Affects major corrections. Interacts with teleportThreshold, positionTolerance.
-overCorrectionThreshold      - Threshold for what counts as an "over-correction." Used in diagnostics. Interacts with maxCorrectionDistance.
-reCorrectionThreshold        - Minimum distance to trigger a forced recorrection. Affects snap corrections. Interacts with desyncCorrectionTime, reCorrectionDelay.
-correctionAggressiveness     - Multiplier for how aggressive corrections are. Affects correction smoothing. Interacts with baseCorrectionSmoothing, correctionDamping.
-predictionAdjustmentFactor   - Factor for prediction blending. Affects how much prediction is applied. Interacts with basePredictionFactor, extrapolationLimiter.
-desyncToleranceMultiplier    - Multiplies all tolerance thresholds. Affects all correction/teleport triggers. Interacts with positionTolerance, teleportThreshold.
+maxCorrectionDistance       
+- Maximum distance to allow correction before teleporting. Affects major corrections. Interacts with teleportThreshold, positionTolerance.
+overCorrectionThreshold
+ - Threshold for what counts as an "over-correction." Used in diagnostics. Interacts with maxCorrectionDistance.
+reCorrectionThreshold
+ - Minimum distance to trigger a forced recorrection. Affects snap corrections. Interacts with desyncCorrectionTime, reCorrectionDelay.
+correctionAggressiveness
+ - Multiplier for how aggressive corrections are. Affects correction smoothing. Interacts with baseCorrectionSmoothing, correctionDamping.
+predictionAdjustmentFactor
+  - Factor for prediction blending. Affects how much prediction is applied. Interacts with basePredictionFactor, extrapolationLimiter.
+desyncToleranceMultiplier
+  - Multiplies all tolerance thresholds. Affects all correction/teleport triggers. Interacts with positionTolerance, teleportThreshold.
 
 ========================================
 INTERDEPENDENCIES
