@@ -1,0 +1,1079 @@
+using UnityEngine;
+using UnityEngine.UI;
+using System.Collections.Generic;
+using System.Collections;
+using System;
+
+public class PlayerSyncManager : MonoBehaviour
+{
+    private struct PlayerState
+    {
+        public Vector3 Position;
+        public float Rotation;
+        public float ServerTimestamp;
+        public Vector3 Velocity;
+        public float ClientReceiveTime;
+    }
+
+    // === Multiplayer Sync & Smoothing Variables ===
+    [SerializeField] public float updateInterval = 0.0083f; // Default: ~120Hz
+    [SerializeField] public float positionTolerance = 0.015f;
+    [SerializeField] public float rotationTolerance = 0.4f;
+    [SerializeField] public float initialMoveDelay = 0.04f;
+    [SerializeField] public float initialCorrectGracePeriod = 0.05f;
+    [SerializeField] public float movementThreshold = 0.002f;
+    [SerializeField] public float inputSmoothing = 0.18f;
+    [SerializeField] public float minMoveDistance = 0.0015f;
+    [SerializeField] public float minRotationAngle = 0.08f;
+    [SerializeField] public float baseInterpTime = 0.048f;
+    [SerializeField] public float minInterpTime = 0.01f;
+    [SerializeField] public float baseCorrectionSmoothing = 0.88f;
+    [SerializeField] public float basePredictionFactor = 0.16f;
+    [SerializeField] public float baseVelocitySmoothing = 0.29f;
+    [SerializeField] public float baseJitterBufferDelay = 0.008f;
+    [SerializeField] public float maxStateBufferSize = 5f;
+    [SerializeField] public float minStateBufferSize = 3f;
+    [SerializeField] public float maxVelocity = 13f;
+    [SerializeField] public float rotationDamping = 0.95f;
+    [SerializeField] public float teleportThreshold = 2.0f;
+    [SerializeField] public float desyncCorrectionTime = 0.25f;
+    [SerializeField] public float velocityPredictionDamping = 0.5f;
+    [SerializeField] public float extrapolationLimiter = 0.2f;
+
+    // === Game-Specific Variables ===
+    [SerializeField] private float maxSpeed = 4.5f;
+    [SerializeField] private float minSpeed = 0f;
+    [SerializeField] private float boostSpeedMultiplier = 2f;
+    [SerializeField] private float rotationSpeed = 180f;
+    [SerializeField] private float leftXPosition = -21.4f;
+    [SerializeField] private float rightXPosition = 47.42f;
+    [SerializeField] private float topYPosition = 21.15f;
+    [SerializeField] private float bottomYPosition = -48.3f;
+    private const float HEALTH_BAR_OFFSET = 0.5f;
+
+    // === UI Variables ===
+    [SerializeField] private Button toggleButton;
+    [SerializeField] private GameObject settingsPanel;
+    [SerializeField] private Button resetButton;
+    [SerializeField] private Button exitButton;
+    [SerializeField] private GameObject variableEntryPrefab; // Prefab with 2 InputFields, 2 Buttons
+    [SerializeField] private Transform contentParent; // ScrollView content
+    [SerializeField] private float entrySpacing = 15f; // Vertical spacing between prefab entries
+    [SerializeField] private DotShooter dotShooter; // Reference to DotShooter component
+    private bool isPanelActive = false;
+
+    // === Diagnostic Variables ===
+    private struct PlayerDiagnostics
+    {
+        public float LastDesyncDistance;
+        public int DesyncCount;
+        public float LastJitter;
+        public int JitterCount;
+        public int TeleportCount;
+        public float AverageRTT;
+        public int BufferUnderflowCount;
+        public int BufferOverflowCount;
+        public float LastUpdateTime;
+    }
+
+    private Dictionary<int, PlayerDiagnostics> playerDiagnostics = new Dictionary<int, PlayerDiagnostics>();
+    private Dictionary<string, (string SuggestedAction, Color NameColor, Color PlusColor, Color MinusColor)> variableFeedback = new Dictionary<string, (string, Color, Color, Color)>();
+
+    private struct VariableConfig
+    {
+        public string Name;
+        public float DefaultValue;
+        public float MinValue;
+        public float MaxValue;
+        public float Increment;
+        public Action<float> Setter;
+        public Func<float> Getter;
+    }
+
+    private List<VariableConfig> variableConfigs = new List<VariableConfig>();
+    private List<InputField> valueInputFields = new List<InputField>();
+    private List<InputField> nameInputFields = new List<InputField>();
+    private List<Button> plusButtons = new List<Button>();
+    private List<Button> minusButtons = new List<Button>();
+
+    private Joystick joystick;
+    private GameNetworkManager networkManager;
+    private float lastUpdateTime;
+    private bool isBoosting = false;
+    private float boostAmmoTimer = 0f;
+    private float boostAmmoInterval = 0.1f;
+    private bool isShootingRotation = false;
+    private float shootingRotationTimer = 0f;
+    private float shootingRotationDuration = 0.3f;
+    private Vector3 lastSentPosition;
+    private float lastSentRotation;
+    private float spawnTime;
+    private Vector3 spawnPosition;
+    private bool hasMoved = false;
+    private bool isFacingBackward = false;
+    private float baseRotation = 0f;
+    private Vector2 smoothedInput;
+    private Vector2 lastInput;
+    private Queue<(Vector3 Position, float Rotation, long Timestamp)> pendingMoves = new Queue<(Vector3, float, long)>();
+    private float lastServerRejectionTime;
+    private Vector3 playerPosition;
+    private float playerRotation;
+    private Dictionary<int, GameObject> otherPlayers = new Dictionary<int, GameObject>();
+    private Dictionary<int, PlayerState> currentStates = new Dictionary<int, PlayerState>();
+    private Dictionary<int, PlayerState> targetStates = new Dictionary<int, PlayerState>();
+    private Dictionary<int, float> estimatedRTT = new Dictionary<int, float>();
+    private Dictionary<int, Queue<PlayerState>> stateBuffers = new Dictionary<int, Queue<PlayerState>>();
+    private Dictionary<int, float> lastPacketTimes = new Dictionary<int, float>();
+    private Dictionary<int, float> lastDesyncTimes = new Dictionary<int, float>();
+
+    public static PlayerSyncManager Instance { get; private set; }
+
+    void Awake()
+    {
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+        Instance = this;
+        DontDestroyOnLoad(gameObject);
+    }
+
+    void Start()
+    {
+        networkManager = GameNetworkManager.Instance;
+        dotShooter = FindObjectOfType<DotShooter>();
+        smoothedInput = Vector2.zero;
+        lastInput = Vector2.zero;
+        InitializeUI();
+    }
+
+    private void InitializeUI()
+    {
+        if (toggleButton == null || settingsPanel == null || resetButton == null || exitButton == null || variableEntryPrefab == null || contentParent == null)
+        {
+            Debug.LogError("UI components not assigned in PlayerSyncManager. Please check Inspector assignments.");
+            return;
+        }
+
+        settingsPanel.SetActive(false);
+        toggleButton.onClick.AddListener(ToggleSettingsPanel);
+        exitButton.onClick.AddListener(() => settingsPanel.SetActive(false));
+        -1);
+        resetButton.onClick.AddListener(ResetToDefaults);
+
+        RectTransform contentRect = contentParent.GetComponent<RectTransform>();
+        contentRect.anchorMin = new Vector2(0, 1);
+        contentRect.anchorMax = new Vector2(1, 1);
+        contentRect.pivot = new Vector2(0.5f, 1);
+        contentRect.anchoredPosition = Vector2.zero;
+        contentRect.sizeDelta = new Vector2(0, contentRect.sizeDelta.y);
+
+        VerticalLayoutGroup layout = contentParent.GetComponent<VerticalLayoutGroup>();
+        if (!layout)
+        {
+            layout = contentParent.gameObject.AddComponent<VerticalLayoutGroup>();
+        }
+        layout.childAlignment = TextAnchor.UpperLeft;
+        layout.childForceExpandWidth = true;
+        layout.childForceExpandHeight = false;
+        layout.spacing = entrySpacing;
+        layout.padding = new RectOffset(15, 15, 15, 15);
+
+        ContentSizeFitter fitter = contentParent.GetComponent<ContentSizeFitter>();
+        if (!fitter)
+        {
+            fitter = contentParent.gameObject.AddComponent<ContentSizeFitter>();
+        }
+        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+        variableConfigs = new List<VariableConfig>
+        {
+            new VariableConfig { Name = "updateInterval", DefaultValue = 0.0083f, MinValue = 0.004f, MaxValue = 0.02f, Increment = 0.0001f, Setter = v => updateInterval = v, Getter = () => updateInterval },
+            new VariableConfig { Name = "positionTolerance", DefaultValue = 0.015f, MinValue = 0.005f, MaxValue = 0.1f, Increment = 0.001f, Setter = v => positionTolerance = v, Getter = () => positionTolerance },
+            new VariableConfig { Name = "rotationTolerance", DefaultValue = 0.4f, MinValue = 0.1f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => rotationTolerance = v, Getter = () => rotationTolerance },
+            new VariableConfig { Name = "teleportThreshold", DefaultValue = 2.0f, MinValue = 0.5f, MaxValue = 5.0f, Increment = 0.1f, Setter = v => teleportThreshold = v, Getter = () => teleportThreshold },
+            new VariableConfig { Name = "initialMoveDelay", DefaultValue = 0.04f, MinValue = 0.01f, MaxValue = 0.1f, Increment = 0.001f, Setter = v => initialMoveDelay = v, Getter = () => initialMoveDelay },
+            new VariableConfig { Name = "initialCorrectGracePeriod", DefaultValue = 0.05f, MinValue = 0.01f, MaxValue = 0.1f, Increment = 0.001f, Setter = v => initialCorrectGracePeriod = v, Getter = () => initialCorrectGracePeriod },
+            new VariableConfig { Name = "movementThreshold", DefaultValue = 0.002f, MinValue = 0.0005f, MaxValue = 0.01f, Increment = 0.0001f, Setter = v => movementThreshold = v, Getter = () => movementThreshold },
+            new VariableConfig { Name = "minMoveDistance", DefaultValue = 0.0015f, MinValue = 0.0005f, MaxValue = 0.01f, Increment = 0.0001f, Setter = v => minMoveDistance = v, Getter = () => minMoveDistance },
+            new VariableConfig { Name = "minRotationAngle", DefaultValue = 0.08f, MinValue = 0.05f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => minRotationAngle = v, Getter = () => minRotationAngle },
+            new VariableConfig { Name = "inputSmoothing", DefaultValue = 0.18f, MinValue = 0.05f, MaxValue = 0.5f, Increment = 0.01f, Setter = v => inputSmoothing = v, Getter = () => inputSmoothing },
+            new VariableConfig { Name = "baseInterpTime", DefaultValue = 0.048f, MinValue = 0.02f, MaxValue = 0.2f, Increment = 0.001f, Setter = v => baseInterpTime = v, Getter = () => baseInterpTime },
+            new VariableConfig { Name = "minInterpTime", DefaultValue = 0.01f, MinValue = 0.005f, MaxValue = 0.05f, Increment = 0.001f, Setter = v => minInterpTime = v, Getter = () => minInterpTime },
+            new VariableConfig { Name = "rotationDamping", DefaultValue = 0.95f, MinValue = 0.7f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => rotationDamping = v, Getter = () => rotationDamping },
+            new VariableConfig { Name = "basePredictionFactor", DefaultValue = 0.16f, MinValue = 0.05f, MaxValue = 0.5f, Increment = 0.01f, Setter = v => basePredictionFactor = v, Getter = () => basePredictionFactor },
+            new VariableConfig { Name = "baseVelocitySmoothing", DefaultValue = 0.29f, MinValue = 0.1f, MaxValue = 0.5f, Increment = 0.01f, Setter = v => baseVelocitySmoothing = v, Getter = () => baseVelocitySmoothing },
+            new VariableConfig { Name = "velocityPredictionDamping", DefaultValue = 0.5f, MinValue = 0f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => velocityPredictionDamping = v, Getter = () => velocityPredictionDamping },
+            new VariableConfig { Name = "extrapolationLimiter", DefaultValue = 0.2f, MinValue = 0.05f, MaxValue = 0.3f, Increment = 0.01f, Setter = v => extrapolationLimiter = v, Getter = () => extrapolationLimiter },
+            new VariableConfig { Name = "baseCorrectionSmoothing", DefaultValue = 0.88f, MinValue = 0.3f, MaxValue = 1.5f, Increment = 0.01f, Setter = v => baseCorrectionSmoothing = v, Getter = () => baseCorrectionSmoothing },
+            new VariableConfig { Name = "desyncCorrectionTime", DefaultValue = 0.25f, MinValue = 0.05f, MaxValue = 0.5f, Increment = 0.01f, Setter = v => desyncCorrectionTime = v, Getter = () => desyncCorrectionTime },
+            new VariableConfig { Name = "baseJitterBufferDelay", DefaultValue = 0.008f, MinValue = 0.005f, MaxValue = 0.05f, Increment = 0.001f, Setter = v => baseJitterBufferDelay = v, Getter = () => baseJitterBufferDelay },
+            new VariableConfig { Name = "minStateBufferSize", DefaultValue = 3f, MinValue = 2f, MaxValue = 4f, Increment = 1f, Setter = v => minStateBufferSize = v, Getter = () => minStateBufferSize },
+            new VariableConfig { Name = "maxStateBufferSize", DefaultValue = 5f, MinValue = 4f, MaxValue = 8f, Increment = 1f, Setter = v => maxStateBufferSize = v, Getter = () => maxStateBufferSize }
+        };
+
+        foreach (Transform child in contentParent)
+        {
+            Destroy(child.gameObject);
+        }
+        valueInputFields.Clear();
+        nameInputFields.Clear();
+        plusButtons.Clear();
+        minusButtons.Clear();
+
+        foreach (var config in variableConfigs)
+        {
+            GameObject entry = Instantiate(variableEntryPrefab, contentParent);
+            RectTransform entryRect = entry.GetComponent<RectTransform>();
+            entryRect.localScale = Vector3.one;
+            entryRect.anchoredPosition3D = new Vector3(entryRect.anchoredPosition3D.x, entryRect.anchoredPosition3D.y, 0);
+            entryRect.anchorMin = new Vector2(0, 1);
+            entryRect.anchorMax = new Vector2(1, 1);
+            entryRect.pivot = new Vector2(0.5f, 1);
+
+            InputField nameField = entry.transform.Find("NameField")?.GetComponent<InputField>();
+            InputField valueField = entry.transform.Find("ValueField")?.GetComponent<InputField>();
+            Button plusButton = entry.transform.Find("PlusButton")?.GetComponent<Button>();
+            Button minusButton = entry.transform.Find("MinusButton")?.GetComponent<Button>();
+
+            if (nameField == null || valueField == null || plusButton == null || minusButton == null)
+            {
+                Debug.LogError($"Variable entry prefab missing required components for {config.Name}. Ensure NameField, ValueField, PlusButton, and MinusButton exist.");
+                continue;
+            }
+
+            nameField.text = config.Name;
+            nameField.interactable = false;
+            nameInputFields.Add(nameField);
+
+            valueField.text = config.Getter().ToString("F4");
+            valueInputFields.Add(valueField);
+            valueField.onEndEdit.AddListener((value) =>
+            {
+                if (float.TryParse(value, out float newValue))
+                {
+                    newValue = Mathf.Clamp(newValue, config.MinValue, config.MaxValue);
+                    config.Setter(newValue);
+                    valueField.text = newValue.ToString("F4");
+                }
+                else
+                {
+                    valueField.text = config.Getter().ToString("F4");
+                }
+            });
+
+            plusButton.onClick.AddListener(() =>
+            {
+                float current = config.Getter();
+                float newValue = Mathf.Clamp(current + config.Increment, config.MinValue, config.MaxValue);
+                config.Setter(newValue);
+                valueField.text = newValue.ToString("F4");
+            });
+            minusButton.onClick.AddListener(() =>
+            {
+                float current = config.Getter();
+                float newValue = Mathf.Clamp(current - config.Increment, config.MinValue, config.MaxValue);
+                config.Setter(newValue);
+                valueField.text = newValue.ToString("F4");
+            });
+
+            plusButtons.Add(plusButton);
+            minusButtons.Add(minusButton);
+
+            // Initialize variable feedback
+            variableFeedback[config.Name] = ("None", Color.white, Color.gray, Color.gray);
+        }
+
+        LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
+        Canvas.ForceUpdateCanvases();
+        Debug.Log($"Content parent configured with spacing: {layout.spacing}");
+    }
+
+    private void ToggleSettingsPanel()
+    {
+        isPanelActive = !isPanelActive;
+        settingsPanel.SetActive(isPanelActive);
+
+        // Toggle DotShooter and PlayerMovement scripts
+        if (dotShooter != null)
+        {
+            dotShooter.enabled = !isPanelActive;
+        }
+
+        GameObject[] players = GameObject.FindGameObjectsWithTag("Player");
+        foreach (GameObject player in players)
+        {
+            PlayerMovement movement = player.GetComponent<PlayerMovement>();
+            if (movement != null)
+            {
+                movement.enabled = !isPanelActive;
+            }
+        }
+
+        if (isPanelActive)
+        {
+            RectTransform panelRect = settingsPanel.GetComponent<RectTransform>();
+            panelRect.anchoredPosition = Vector2.zero;
+            Debug.Log("Settings panel activated. Position: " + panelRect.anchoredPosition);
+            UpdateVariableFeedbackUI();
+        }
+    }
+
+    private void ResetToDefaults()
+    {
+        foreach (var config in variableConfigs)
+        {
+            config.Setter(config.DefaultValue);
+        }
+        for (int i = 0; i < variableConfigs.Count; i++)
+        {
+            valueInputFields[i].text = variableConfigs[i].Getter().ToString("F4");
+        }
+        // Reset variable feedback
+        foreach (var config in variableConfigs)
+        {
+            variableFeedback[config.Name] = ("None", Color.white, Color.gray, Color.gray);
+        }
+        UpdateVariableFeedbackUI();
+    }
+
+    public void InitializeLocalPlayer(GameObject localPlayer, Vector3 position, float rotation)
+    {
+        lastSentPosition = position;
+        lastSentRotation = rotation;
+        playerPosition = position;
+        playerRotation = rotation;
+        spawnPosition = position;
+        spawnTime = Time.time;
+        hasMoved = false;
+        isFacingBackward = false;
+        baseRotation = rotation;
+        smoothedInput = Vector2.zero;
+        lastInput = Vector2.zero;
+        pendingMoves.Clear();
+    }
+
+    void Update()
+    {
+        if (networkManager == null || PlayerManagerClient.Instance.LocalPlayer == null)
+        {
+            return;
+        }
+
+        UpdateLocalPlayerMovement();
+        UpdateOtherPlayers();
+        UpdateDiagnostics();
+    }
+
+    private void UpdateDiagnostics()
+    {
+        foreach (var id in otherPlayers.Keys)
+        {
+            if (!otherPlayers.ContainsKey(id) || otherPlayers[id] == null) continue;
+
+            if (!playerDiagnostics.ContainsKey(id))
+            {
+                playerDiagnostics[id] = new PlayerDiagnostics
+                {
+                    LastDesyncDistance = 0f,
+                    DesyncCount = 0,
+                    LastJitter = 0f,
+                    JitterCount = 0,
+                    TeleportCount = 0,
+                    AverageRTT = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f,
+                    BufferUnderflowCount = 0,
+                    BufferOverflowCount = 0,
+                    LastUpdateTime = Time.time
+                };
+            }
+
+            var diagnostics = playerDiagnostics[id];
+            float currentTime = Time.time;
+
+            // Check buffer state
+            if (stateBuffers.ContainsKey(id))
+            {
+                var buffer = stateBuffers[id];
+                float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f;
+                int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.2f));
+
+                if (buffer.Count < minStateBufferSize)
+                {
+                    diagnostics.BufferUnderflowCount++;
+                }
+                else if (buffer.Count > targetBufferSize)
+                {
+                    diagnostics.BufferOverflowCount++;
+                }
+            }
+
+            // Update average RTT
+            if (estimatedRTT.ContainsKey(id))
+            {
+                diagnostics.AverageRTT = Mathf.Lerp(diagnostics.AverageRTT, estimatedRTT[id], 0.1f);
+            }
+
+            // Check for jitter (inconsistent velocity)
+            if (targetStates.ContainsKey(id) && currentStates.ContainsKey(id))
+            {
+                var target = targetStates[id];
+                var current = currentStates[id];
+                float timeDelta = target.ServerTimestamp - current.ServerTimestamp;
+                if (timeDelta > 0)
+                {
+                    Vector3 velocityChange = target.Velocity - current.Velocity;
+                    float jitter = velocityChange.magnitude / timeDelta;
+                    if (jitter > 10f)
+                    {
+                        diagnostics.LastJitter = jitter;
+                        diagnostics.JitterCount++;
+                    }
+                }
+            }
+
+            playerDiagnostics[id] = diagnostics;
+        }
+
+        // Update variable feedback based on diagnostics
+        UpdateVariableFeedback();
+    }
+
+    private void UpdateVariableFeedback()
+    {
+        // Reset feedback
+        foreach (var config in variableConfigs)
+        {
+            variableFeedback[config.Name] = ("None", Color.white, Color.gray, Color.gray);
+        }
+
+        foreach (var id in playerDiagnostics.Keys)
+        {
+            var diagnostics = playerDiagnostics[id];
+
+            // High desync count suggests positionTolerance or baseCorrectionSmoothing issues
+            if (diagnostics.DesyncCount > 5)
+            {
+                if (diagnostics.LastDesyncDistance > positionTolerance * 2f)
+                {
+                    variableFeedback["positionTolerance"] = ("Increase to reduce desync", Color.red, Color.green, Color.gray);
+                    variableFeedback["baseCorrectionSmoothing"] = ("Decrease for faster correction", Color.red, Color.gray, Color.green);
+                }
+                else
+                {
+                    variableFeedback["positionTolerance"] = ("Decrease for tighter sync", Color.red, Color.gray, Color.green);
+                }
+            }
+
+            // High jitter count suggests interpolation or velocity smoothing issues
+            if (diagnostics.JitterCount > 5)
+            {
+                variableFeedback["baseInterpTime"] = ("Increase for smoother interpolation", Color.red, Color.green, Color.gray);
+                variableFeedback["baseVelocitySmoothing"] = ("Increase for smoother velocity", Color.red, Color.green, Color.gray);
+            }
+
+            // Teleporting suggests teleportThreshold or desyncCorrectionTime issues
+            if (diagnostics.TeleportCount > 2)
+            {
+                variableFeedback["teleportThreshold"] = ("Increase to avoid teleports", Color.red, Color.green, Color.gray);
+                variableFeedback["desyncCorrectionTime"] = ("Decrease for faster correction", Color.red, Color.gray, Color.green);
+            }
+
+            // Buffer underflow suggests insufficient buffer size or update interval
+            if (diagnostics.BufferUnderflowCount > 5)
+            {
+                variableFeedback["minStateBufferSize"] = ("Increase to prevent underflow", Color.red, Color.green, Color.gray);
+                variableFeedback["updateInterval"] = ("Decrease for more frequent updates", Color.red, Color.gray, Color.green);
+            }
+
+            // Buffer overflow suggests excessive buffer size
+            if (diagnostics.BufferOverflowCount > 5)
+            {
+                variableFeedback["maxStateBufferSize"] = ("Decrease to prevent overflow", Color.red, Color.gray, Color.green);
+            }
+
+            // High RTT suggests increasing jitter buffer delay
+            if (diagnostics.AverageRTT > 0.15f)
+            {
+                variableFeedback["baseJitterBufferDelay"] = ("Increase for high latency", Color.red, Color.green, Color.gray);
+            }
+        }
+
+        if (isPanelActive)
+        {
+            UpdateVariableFeedbackUI();
+        }
+    }
+
+    private void UpdateVariableFeedbackUI()
+    {
+        for (int i = 0; i < variableConfigs.Count; i++)
+        {
+            var config = variableConfigs[i];
+            var feedback = variableFeedback[config.Name];
+
+            // Update name field color
+            Text nameText = nameInputFields[i].GetComponentInChildren<Text>();
+            if (nameText != null)
+            {
+                nameText.color = feedback.NameColor;
+            }
+
+            // Update plus button color
+            Image plusImage = plusButtons[i].GetComponent<Image>();
+            if (plusImage != null)
+            {
+                plusImage.color = feedback.PlusColor;
+            }
+
+            // Update minus button color
+            Image minusImage = minusButtons[i].GetComponent<Image>();
+            if (minusImage != null)
+            {
+                minusImage.color = feedback.MinusColor;
+            }
+        }
+    }
+
+    private void UpdateLocalPlayerMovement()
+    {
+        GameObject localPlayer = PlayerManagerClient.Instance.LocalPlayer;
+        float currentRotation = localPlayer.transform.rotation.eulerAngles.z;
+        Vector2 input = Vector2.zero;
+        float rotationInput = 0f;
+        bool useJoystick = false;
+
+        if (joystick == null)
+        {
+            joystick = FindFirstObjectByType<Joystick>();
+        }
+
+        useJoystick = joystick != null && joystick.IsActive;
+
+        if (useJoystick)
+        {
+            Vector2 rawInput = joystick.GetInput();
+            smoothedInput = Vector2.Lerp(smoothedInput, rawInput, inputSmoothing / Time.deltaTime);
+            lastInput = rawInput;
+            input = smoothedInput;
+            isBoosting = joystick.IsBoosting && GameNetworkManager.Instance.AmmoCount > 0 && rawInput != Vector2.zero;
+        }
+        else
+        {
+            if (Input.GetKey(KeyCode.A))
+            {
+                rotationInput = 1f;
+            }
+            if (Input.GetKey(KeyCode.D))
+            {
+                rotationInput = -1f;
+            }
+            if (Input.GetKeyDown(KeyCode.W) && !isShootingRotation)
+            {
+                isFacingBackward = false;
+            }
+            if (Input.GetKeyDown(KeyCode.S) && !isShootingRotation)
+            {
+                isFacingBackward = true;
+            }
+            if (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.S))
+            {
+                input = new Vector2(0f, 1f);
+                isBoosting = false;
+            }
+        }
+
+        if (!isShootingRotation && rotationInput != 0f)
+        {
+            float rotationDelta = rotationInput * rotationSpeed * Time.deltaTime;
+            baseRotation = (baseRotation + rotationDelta) % 360f;
+        }
+
+        currentRotation = isFacingBackward ? (baseRotation + 180f) % 360f : baseRotation;
+
+        float baseSpeed = useJoystick ? Mathf.Lerp(minSpeed, maxSpeed, input.magnitude * input.magnitude) : maxSpeed;
+        float speed = isBoosting ? baseSpeed * boostSpeedMultiplier : baseSpeed;
+        Vector3 movement;
+        if (useJoystick && input != Vector2.zero)
+        {
+            movement = input.normalized * speed * Time.deltaTime;
+        }
+        else
+        {
+            Vector3 direction = Quaternion.Euler(0, 0, currentRotation) * Vector3.up;
+            movement = direction * input.y * speed * Time.deltaTime;
+        }
+
+        playerPosition += movement;
+        playerPosition.x = Mathf.Clamp(playerPosition.x, leftXPosition, rightXPosition);
+        playerPosition.y = Mathf.Clamp(playerPosition.y, bottomYPosition, topYPosition);
+        playerRotation = currentRotation;
+
+        localPlayer.transform.position = playerPosition;
+        localPlayer.transform.rotation = Quaternion.Euler(0f, 0f, playerRotation);
+
+        if (isShootingRotation)
+        {
+            shootingRotationTimer += Time.deltaTime;
+            if (shootingRotationTimer >= shootingRotationDuration)
+            {
+                isShootingRotation = false;
+            }
+        }
+        else if (useJoystick && input != Vector2.zero)
+        {
+            float rotation = Mathf.Atan2(input.y, input.x) * Mathf.Rad2Deg - 90f;
+            playerRotation = rotation;
+            localPlayer.transform.rotation = Quaternion.Euler(0f, 0f, rotation);
+            baseRotation = rotation;
+            isFacingBackward = false;
+        }
+
+        if (!hasMoved && Vector3.Distance(localPlayer.transform.position, spawnPosition) > movementThreshold)
+        {
+            hasMoved = true;
+        }
+
+        if (Time.time - spawnTime > initialMoveDelay && Time.time - lastUpdateTime >= updateInterval)
+        {
+            Vector3 currentPosition = playerPosition;
+            float positionDelta = Vector3.Distance(currentPosition, lastSentPosition);
+            float rotationDelta = Mathf.Abs(playerRotation - lastSentRotation);
+
+            if (positionDelta > minMoveDistance || rotationDelta > minRotationAngle)
+            {
+                long timestamp = (long)((Time.time + networkManager.serverTimeOffset) * 1000f);
+                pendingMoves.Clear();
+                pendingMoves.Enqueue((currentPosition, playerRotation, timestamp));
+            }
+
+            if (pendingMoves.Count > 0)
+            {
+                (Vector3 sendPosition, float sendRotation, long sendTimestamp) = pendingMoves.Peek();
+                string moveMessage = $"MOVE {networkManager.LocalPlayerID} {sendPosition.x:F2} {sendPosition.y:F2} {sendPosition.z:F2} {sendRotation:F2} {networkManager.PlayerToken} {sendTimestamp}";
+                networkManager.SendNetworkMessage(moveMessage);
+                lastSentPosition = sendPosition;
+                lastSentRotation = sendRotation;
+                lastUpdateTime = Time.time;
+                pendingMoves.Dequeue();
+            }
+        }
+
+        if (isBoosting)
+        {
+            boostAmmoTimer += Time.deltaTime;
+            if (boostAmmoTimer >= boostAmmoInterval)
+            {
+                GameNetworkManager.Instance.AmmoCount -= 1;
+                GameNetworkManager.Instance.PlayerAmmo[GameNetworkManager.Instance.LocalPlayerID] = GameNetworkManager.Instance.AmmoCount;
+                GameNetworkManager.Instance.SendNetworkMessage($"AMMO {networkManager.LocalPlayerID} {GameNetworkManager.Instance.AmmoCount} {networkManager.PlayerToken}");
+                boostAmmoTimer = 0f;
+
+                if (GameNetworkManager.Instance.AmmoCount <= 0)
+                {
+                    isBoosting = false;
+                    if (joystick != null) joystick.StopBoosting();
+                }
+            }
+        }
+        else
+        {
+            boostAmmoTimer = 0f;
+        }
+    }
+
+    private void UpdateOtherPlayers()
+    {
+        foreach (var id in otherPlayers.Keys)
+        {
+            if (!otherPlayers.ContainsKey(id) || otherPlayers[id] == null) continue;
+
+            if (!stateBuffers.ContainsKey(id) || stateBuffers[id].Count < 2) continue;
+
+            var buffer = stateBuffers[id];
+            float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : baseJitterBufferDelay;
+            float jitterBufferDelay = Mathf.Clamp(baseJitterBufferDelay * (rtt / 0.08f), 0.01f, 0.1f);
+
+            int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.2f));
+            while (buffer.Count > targetBufferSize)
+            {
+                buffer.Dequeue();
+            }
+
+            while (buffer.Count > 1 && Time.time - buffer.Peek().ClientReceiveTime > jitterBufferDelay)
+            {
+                var state = buffer.Dequeue();
+                currentStates[id] = targetStates[id];
+                targetStates[id] = state;
+            }
+
+            if (!targetStates.ContainsKey(id) || !currentStates.ContainsKey(id)) continue;
+
+            var target = targetStates[id];
+            var current = currentStates[id];
+
+            float serverTimeNow = Time.time + GameNetworkManager.Instance.serverTimeOffset;
+            float interpTime = Mathf.Clamp(rtt * 0.5f, minInterpTime, baseInterpTime * (rtt / 0.08f));
+            float t = Mathf.Clamp01((serverTimeNow - target.ServerTimestamp) / interpTime);
+
+            float predictionFactor = Mathf.Lerp(basePredictionFactor * 0.5f, basePredictionFactor, rtt / 0.2f);
+            float predictionTime = Mathf.Min(interpTime * predictionFactor, extrapolationLimiter);
+            Vector3 predictedPos = target.Position + Vector3.ClampMagnitude(target.Velocity, maxVelocity) * predictionTime;
+
+            float correctionSmoothing = Mathf.Lerp(baseCorrectionSmoothing * 0.5f, baseCorrectionSmoothing * 1.5f, rtt / 0.2f);
+            Vector3 newPos = Vector3.Lerp(current.Position, predictedPos, t);
+
+            float rotationT = t * rotationDamping;
+            Quaternion newRot = Quaternion.Slerp(
+                Quaternion.Euler(0, 0, current.Rotation),
+                Quaternion.Euler(0, 0, target.Rotation),
+                rotationT
+            );
+
+            Vector3 currentPos = otherPlayers[id].transform.position;
+            float desyncDistance = Vector3.Distance(currentPos, newPos);
+
+            // Update diagnostics for desync and teleport
+            if (playerDiagnostics.ContainsKey(id))
+            {
+                var diagnostics = playerDiagnostics[id];
+                diagnostics.LastDesyncDistance = desyncDistance;
+                if (desyncDistance > positionTolerance)
+                {
+                    diagnostics.DesyncCount++;
+                }
+                if (desyncDistance > teleportThreshold)
+                {
+                    diagnostics.TeleportCount++;
+                }
+                playerDiagnostics[id] = diagnostics;
+            }
+
+            if (desyncDistance > teleportThreshold)
+            {
+                newPos = predictedPos;
+                otherPlayers[id].transform.rotation = Quaternion.Euler(0, 0, target.Rotation);
+                currentStates[id] = target;
+            }
+            else if (desyncDistance > 0.2f)
+            {
+                newPos = Vector3.Lerp(currentPos, newPos, correctionSmoothing);
+            }
+
+            if (desyncDistance > positionTolerance)
+            {
+                if (!lastDesyncTimes.ContainsKey(id))
+                {
+                    lastDesyncTimes[id] = Time.time;
+                }
+                else if (Time.time - lastDesyncTimes[id] > desyncCorrectionTime)
+                {
+                    newPos = predictedPos;
+                    otherPlayers[id].transform.rotation = Quaternion.Euler(0, 0, target.Rotation);
+                    currentStates[id] = target;
+                    lastDesyncTimes[id] = Time.time;
+                }
+            }
+            else
+            {
+                lastDesyncTimes.Remove(id);
+            }
+
+            otherPlayers[id].transform.position = newPos;
+            otherPlayers[id].transform.rotation = newRot;
+
+            if (OtherPlayersManagerClient.Instance.HealthBars.ContainsKey(id) && OtherPlayersManagerClient.Instance.HealthBars[id] != null)
+            {
+                OtherPlayersManagerClient.Instance.HealthBars[id].transform.position = newPos + new Vector3(0, HEALTH_BAR_OFFSET, 0);
+                OtherPlayersManagerClient.Instance.HealthBars[id].transform.rotation = Quaternion.identity;
+            }
+
+            if (t >= 1f)
+            {
+                currentStates[id] = new PlayerState
+                {
+                    Position = predictedPos,
+                    Rotation = target.Rotation,
+                    ServerTimestamp = target.ServerTimestamp,
+                    Velocity = target.Velocity,
+                    ClientReceiveTime = target.ClientReceiveTime
+                };
+            }
+        }
+    }
+
+    public void SetTemporaryRotation(GameObject localPlayer, float rotation)
+    {
+        isShootingRotation = true;
+        shootingRotationTimer = 0f;
+        playerRotation = rotation;
+        localPlayer.transform.rotation = Quaternion.Euler(0f, 0f, rotation);
+        baseRotation = rotation;
+        isFacingBackward = false;
+    }
+
+    public void CorrectPosition(GameObject localPlayer, Vector3 serverPosition, float serverRotation)
+    {
+        if (Time.time - spawnTime < initialCorrectGracePeriod &&
+            Vector3.Distance(serverPosition, playerPosition) < positionTolerance &&
+            Mathf.Abs(serverRotation - playerRotation) < rotationTolerance)
+        {
+            return;
+        }
+
+        float desyncDistance = Vector3.Distance(playerPosition, serverPosition);
+        if (desyncDistance > teleportThreshold)
+        {
+            playerPosition = serverPosition;
+            playerRotation = serverRotation;
+            localPlayer.transform.position = serverPosition;
+            localPlayer.transform.rotation = Quaternion.Euler(0f, 0f, serverRotation);
+            lastSentPosition = serverPosition;
+            lastSentRotation = serverRotation;
+            baseRotation = serverRotation;
+            isFacingBackward = false;
+            pendingMoves.Clear();
+            lastServerRejectionTime = Time.time;
+        }
+        else if (desyncDistance > positionTolerance ||
+                 Mathf.Abs(serverRotation - playerRotation) > rotationTolerance)
+        {
+            StartCoroutine(LerpToServerPosition(localPlayer, serverPosition, serverRotation));
+            lastServerRejectionTime = Time.time;
+            pendingMoves.Clear();
+        }
+    }
+
+    private IEnumerator LerpToServerPosition(GameObject localPlayer, Vector3 targetPosition, float targetRotation)
+    {
+        float distance = Vector3.Distance(playerPosition, targetPosition);
+        float lerpTime = Mathf.Clamp(distance * 0.05f, 0.02f, 0.02f);
+        float elapsed = 0f;
+        Vector3 startPosition = playerPosition;
+        Quaternion startRotation = Quaternion.Euler(0f, 0f, playerRotation);
+        Quaternion targetRotationQuat = Quaternion.Euler(0f, 0f, targetRotation);
+
+        while (elapsed < lerpTime)
+        {
+            elapsed += Time.deltaTime;
+            float t = elapsed / lerpTime;
+            playerPosition = Vector3.Lerp(startPosition, targetPosition, t);
+            playerRotation = Quaternion.Slerp(startRotation, targetRotationQuat, t).eulerAngles.z;
+            localPlayer.transform.position = playerPosition;
+            localPlayer.transform.rotation = Quaternion.Euler(0f, 0f, playerRotation);
+            yield return null;
+        }
+
+        playerPosition = targetPosition;
+        playerRotation = targetRotation;
+        localPlayer.transform.position = targetPosition;
+        localPlayer.transform.rotation = targetRotationQuat;
+        lastSentPosition = targetPosition;
+        lastSentRotation = targetRotation;
+        baseRotation = targetRotation;
+        isFacingBackward = false;
+    }
+
+    public void UpdatePlayerPosition(int id, Vector3 position, float rotation, float serverTimestamp = 0f)
+    {
+        position.z = 0f;
+        if (id == GameNetworkManager.Instance.LocalPlayerID)
+        {
+            if (PlayerManagerClient.Instance.LocalPlayer != null)
+            {
+                CorrectPosition(PlayerManagerClient.Instance.LocalPlayer, position, rotation);
+                PlayerManagerClient.Instance.LastSentPosition = position;
+                PlayerManagerClient.Instance.LastSentRotation = rotation;
+            }
+            return;
+        }
+
+        if (!otherPlayers.ContainsKey(id) || otherPlayers[id] == null)
+        {
+            return;
+        }
+
+        float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f;
+        float velocitySmoothing = Mathf.Lerp(baseVelocitySmoothing * 0.5f, baseVelocitySmoothing * 1.5f, rtt / 0.2f);
+        Vector3 velocity = Vector3.zero;
+        if (targetStates.ContainsKey(id))
+        {
+            var lastState = targetStates[id];
+            float timeDelta = serverTimestamp - lastState.ServerTimestamp;
+            if (timeDelta > 0)
+            {
+                Vector3 rawVelocity = (position - lastState.Position) / timeDelta;
+                rawVelocity = Vector3.ClampMagnitude(rawVelocity, maxVelocity);
+                velocity = Vector3.Lerp(lastState.Velocity, rawVelocity, 1f - velocityPredictionDamping);
+
+                // Detect jitter
+                if (playerDiagnostics.ContainsKey(id))
+                {
+                    var diagnostics = playerDiagnostics[id];
+                    float jitter = (rawVelocity - lastState.Velocity).magnitude / timeDelta;
+                    if (jitter > 10f)
+                    {
+                        diagnostics.LastJitter = jitter;
+                        diagnostics.JitterCount++;
+                    }
+                    playerDiagnostics[id] = diagnostics;
+                }
+            }
+        }
+
+        float currentRTT = Time.time - serverTimestamp;
+        if (estimatedRTT.ContainsKey(id))
+        {
+            estimatedRTT[id] = Mathf.Lerp(estimatedRTT[id], currentRTT, 0.1f);
+        }
+        else
+        {
+            estimatedRTT[id] = currentRTT;
+        }
+
+        PlayerState newState = new PlayerState
+        {
+            Position = position,
+            Rotation = rotation,
+            ServerTimestamp = serverTimestamp > 0 ? serverTimestamp : Time.time,
+            Velocity = velocity,
+            ClientReceiveTime = Time.time
+        };
+
+        if (!stateBuffers.ContainsKey(id))
+        {
+            stateBuffers[id] = new Queue<PlayerState>();
+        }
+        stateBuffers[id].Enqueue(newState);
+
+        int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.2f));
+        while (stateBuffers[id].Count > targetBufferSize)
+        {
+            stateBuffers[id].Dequeue();
+        }
+
+        lastPacketTimes[id] = Time.time;
+    }
+
+    public void UpdateAllPositions(string[] parts)
+    {
+        try
+        {
+            if (parts.Length < 2)
+            {
+                return;
+            }
+
+            if (!float.TryParse(parts[1], out float serverTimestamp))
+            {
+                return;
+            }
+
+            float messageTime = Time.time;
+            int updatesProcessed = 0;
+
+            for (int i = 2; i < parts.Length; i += 5)
+            {
+                if (i + 4 >= parts.Length)
+                {
+                    break;
+                }
+
+                try
+                {
+                    if (!int.TryParse(parts[i], out int id))
+                    {
+                        continue;
+                    }
+
+                    if (id == GameNetworkManager.Instance.LocalPlayerID)
+                    {
+                        continue;
+                    }
+
+                    if (!float.TryParse(parts[i + 1], out float x) ||
+                        !float.TryParse(parts[i + 2], out float y) ||
+                        !float.TryParse(parts[i + 3], out float z) ||
+                        !float.TryParse(parts[i + 4], out float rotation))
+                    {
+                        continue;
+                    }
+
+                    Vector3 position = new Vector3(x, y, z);
+
+                    if (!otherPlayers.ContainsKey(id))
+                    {
+                        OtherPlayersManagerClient.Instance?.SpawnOtherPlayer(id, position, rotation, 0, 3, 0, 0);
+                    }
+                    else
+                    {
+                        UpdatePlayerPosition(id, position, rotation, serverTimestamp);
+                    }
+
+                    updatesProcessed++;
+                }
+                catch (System.Exception)
+                {
+                }
+            }
+        }
+        catch (System.Exception)
+        {
+        }
+    }
+
+    public void AddOtherPlayer(int id, GameObject player)
+    {
+        otherPlayers[id] = player;
+        PlayerState initialState = new PlayerState
+        {
+            Position = player.transform.position,
+            Rotation = player.transform.eulerAngles.z,
+            ServerTimestamp = Time.time + GameNetworkManager.Instance.serverTimeOffset,
+            Velocity = Vector3.zero,
+            ClientReceiveTime = Time.time
+        };
+        currentStates[id] = initialState;
+        targetStates[id] = initialState;
+        stateBuffers[id] = new Queue<PlayerState>();
+        stateBuffers[id].Enqueue(initialState);
+        estimatedRTT[id] = 0.08f;
+        lastPacketTimes[id] = Time.time;
+
+        // Initialize diagnostics
+        playerDiagnostics[id] = new PlayerDiagnostics
+        {
+            LastDesyncDistance = 0f,
+            DesyncCount = 0,
+            LastJitter = 0f,
+            JitterCount = 0,
+            TeleportCount = 0,
+            AverageRTT = 0.08f,
+            BufferUnderflowCount = 0,
+            BufferOverflowCount = 0,
+            LastUpdateTime = Time.time
+        };
+    }
+
+    public void RemoveOtherPlayer(int id)
+    {
+        otherPlayers.Remove(id);
+        currentStates.Remove(id);
+        targetStates.Remove(id);
+        stateBuffers.Remove(id);
+        estimatedRTT.Remove(id);
+        lastPacketTimes.Remove(id);
+        lastDesyncTimes.Remove(id);
+        playerDiagnostics.Remove(id);
+    }
+
+    public IEnumerable<int> GetOtherPlayerIDs()
+    {
+        return otherPlayers.Keys;
+    }
+
+    public GameObject GetOtherPlayer(int id)
+    {
+        return otherPlayers.ContainsKey(id) ? otherPlayers[id] : null;
+    }
+}
