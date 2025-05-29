@@ -16,8 +16,30 @@ public class PlayerSyncManager : MonoBehaviour
         public float ClientReceiveTime;
     }
 
-    // === Multiplayer Sync & Smoothing Variables ===
-    [SerializeField] public float updateInterval = 0.0083f; // ~120Hz
+    private struct PlayerDiagnostics
+    {
+        public float LastDesyncDistance;
+        public int DesyncCount;
+        public float LastJitter;
+        public int JitterCount;
+        public int TeleportCount;
+        public float AverageRTT;
+        public int BufferUnderflowCount;
+        public int BufferOverflowCount;
+        public float LastUpdateTime;
+        public float LastCorrectionDistance;
+        public int CorrectionCount;
+        public float LastOverCorrectionDistance;
+        public int OverCorrectionCount;
+        public int NoPacketFrames;
+        public float CurrentFPS;
+        public float CurrentCorrectionStrength;
+        public float CurrentBaseInterpTime;
+        public int ReplayCorrectionCount;
+        public float LastReplayTime;
+    }
+
+    [SerializeField] public float updateInterval = 0.0083f;
     [SerializeField] public float positionTolerance = 0.015f;
     [SerializeField] public float rotationTolerance = 0.4f;
     [SerializeField] public float initialMoveDelay = 0.04f;
@@ -43,9 +65,8 @@ public class PlayerSyncManager : MonoBehaviour
     [SerializeField] public float maxCorrectionSpeed = 5.0f;
     [SerializeField] public float correctionDamping = 0.9f;
     [SerializeField] public float reCorrectionDelay = 0.5f;
-    [SerializeField] public float maxExtrapolationTime = 0.1f; // Clamps prediction time
+    [SerializeField] public float maxExtrapolationTime = 0.1f;
 
-    // === High-Level Sync Variables ===
     [SerializeField] public float maxCorrectionDistance = 1.0f;
     [SerializeField] public float overCorrectionThreshold = 0.5f;
     [SerializeField] public float reCorrectionThreshold = 0.3f;
@@ -53,7 +74,6 @@ public class PlayerSyncManager : MonoBehaviour
     [SerializeField] public float predictionAdjustmentFactor = 0.2f;
     [SerializeField] public float desyncToleranceMultiplier = 1.5f;
 
-    // === Game-Specific Variables ===
     [SerializeField] private float maxSpeed = 4.5f;
     [SerializeField] private float minSpeed = 0f;
     [SerializeField] private float boostSpeedMultiplier = 2f;
@@ -64,12 +84,11 @@ public class PlayerSyncManager : MonoBehaviour
     [SerializeField] private float bottomYPosition = -48.3f;
     private const float HEALTH_BAR_OFFSET = 0.5f;
 
-    // === UI Variables ===
-    [SerializeField] private Button toggleButton; // Low-level panel 1
+    [SerializeField] private Button toggleButton;
     [SerializeField] private GameObject lowLevelSettingsPanel1;
     [SerializeField] private Button resetButton1;
     [SerializeField] private GameObject variableEntryPrefab;
-    [SerializeField] private Transform contentParent1; // ScrollView for low-level panel 1
+    [SerializeField] private Transform contentParent1;
     [SerializeField] private float entrySpacing = 15f;
     [SerializeField] private DotShooter dotShooter;
     [SerializeField] private Button diagnosticsToggleButton;
@@ -77,46 +96,23 @@ public class PlayerSyncManager : MonoBehaviour
     [SerializeField] private Transform diagnosticsContentParent;
     [SerializeField] private GameObject diagnosticsEntryPrefab;
     [SerializeField] private float diagnosticsEntrySpacing = 15f;
-    [SerializeField] private Button highLevelToggleButton; // High-level panel
+    [SerializeField] private Button highLevelToggleButton;
     [SerializeField] private GameObject highLevelSettingsPanel;
     [SerializeField] private Button highLevelResetButton;
     [SerializeField] private Transform highLevelContentParent;
-    [SerializeField] private Button lowLevel2ToggleButton; // Low-level panel 2
+    [SerializeField] private Button lowLevel2ToggleButton;
     [SerializeField] private GameObject lowLevelSettingsPanel2;
     [SerializeField] private Button lowLevel2ResetButton;
     [SerializeField] private Transform lowLevel2ContentParent;
-    [SerializeField] private Button hzToggleButton; // Toggle 120Hz/60Hz
+    [SerializeField] private Button hzToggleButton;
     private bool isLowLevelPanel1Active = false;
     private bool isHighLevelPanelActive = false;
     private bool isLowLevelPanel2Active = false;
     private bool isDiagnosticsPanelActive = false;
-    private bool is120Hz = true; // Default to 120Hz
-
-    // === Diagnostic Variables ===
-    private struct PlayerDiagnostics
-    {
-        public float LastDesyncDistance;
-        public int DesyncCount;
-        public float LastJitter;
-        public int JitterCount;
-        public int TeleportCount;
-        public float AverageRTT;
-        public int BufferUnderflowCount;
-        public int BufferOverflowCount;
-        public float LastUpdateTime;
-        public float LastCorrectionDistance;
-        public int CorrectionCount;
-        public float LastOverCorrectionDistance;
-        public int OverCorrectionCount;
-        public int NoPacketFrames;
-        public float CurrentFPS;
-        public float CurrentCorrectionStrength; // Auto-tuner display
-        public float CurrentBaseInterpTime; // Auto-tuner display
-    }
+    private bool is120Hz = true;
 
     private Dictionary<int, PlayerDiagnostics> playerDiagnostics = new Dictionary<int, PlayerDiagnostics>();
 
-    // === Auto-Adaptive Variables ===
     private Dictionary<int, float> autoAdjustedInterpTime = new Dictionary<int, float>();
     private Dictionary<int, float> autoAdjustedCorrectionSmoothing = new Dictionary<int, float>();
     private Dictionary<int, float> autoAdjustedPredictionFactor = new Dictionary<int, float>();
@@ -124,9 +120,13 @@ public class PlayerSyncManager : MonoBehaviour
     private const float AUTO_DESYNC_MULTIPLIER = 1.5f;
     private const float AUTO_CORRECTION_BOOST = 1.2f;
     private const float AUTO_SMOOTHING_REDUCTION = 0.7f;
-    private const int AUTO_NO_PACKET_THRESHOLD = 60; // Frames without packets
-    private const float AUTO_RTT_THRESHOLD = 0.15f; // 150ms
+    private const int AUTO_NO_PACKET_THRESHOLD = 60;
+    private const float AUTO_RTT_THRESHOLD = 0.15f;
     private const float AUTO_FPS_THRESHOLD = 30f;
+    private Dictionary<int, Queue<(Vector3 Position, float Rotation, float Timestamp)>> replayBuffers = new Dictionary<int, Queue<(Vector3, float, float)>>();
+    private const float REPLAY_BUFFER_DURATION = 3.0f;
+    private const float LAG_SPIKE_RTT_THRESHOLD = 0.3f;
+    private const float REPLAY_LERP_SPEED = 10f;
 
     private struct VariableConfig
     {
@@ -190,7 +190,6 @@ public class PlayerSyncManager : MonoBehaviour
     private int frameCounter;
     private float currentFPS;
 
-    // Drag handling variables
     private Vector2 dragStartPosition;
     private bool isDragging = false;
     private InputField draggedInputField;
@@ -229,7 +228,6 @@ public class PlayerSyncManager : MonoBehaviour
     {
         if (toggleButton == null || lowLevelSettingsPanel1 == null || resetButton1 == null || variableEntryPrefab == null || contentParent1 == null)
         {
-            Debug.LogError("Low-level UI 1 components not assigned in PlayerSyncManager. Please check Inspector assignments.");
             return;
         }
 
@@ -314,7 +312,6 @@ public class PlayerSyncManager : MonoBehaviour
 
             if (nameField == null || valueField == null || plusButton == null || minusButton == null)
             {
-                Debug.LogError($"Low-level 1 variable entry prefab missing required components for {config.Name}. Ensure NameField, ValueField, PlusButton, and MinusButton exist.");
                 continue;
             }
 
@@ -365,14 +362,12 @@ public class PlayerSyncManager : MonoBehaviour
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
         Canvas.ForceUpdateCanvases();
-        Debug.Log($"Low-level 1 content parent configured with spacing: {layout.spacing}");
     }
 
     private void InitializeLowLevelUI2()
     {
         if (lowLevel2ToggleButton == null || lowLevelSettingsPanel2 == null || lowLevel2ResetButton == null || variableEntryPrefab == null || lowLevel2ContentParent == null)
         {
-            Debug.LogError("Low-level UI 2 components not assigned in PlayerSyncManager. Please check Inspector assignments.");
             return;
         }
 
@@ -439,7 +434,6 @@ public class PlayerSyncManager : MonoBehaviour
 
             if (nameField == null || valueField == null || plusButton == null || minusButton == null)
             {
-                Debug.LogError($"Low-level 2 variable entry prefab missing required components for {config.Name}. Ensure NameField, ValueField, PlusButton, and MinusButton exist.");
                 continue;
             }
 
@@ -490,14 +484,12 @@ public class PlayerSyncManager : MonoBehaviour
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
         Canvas.ForceUpdateCanvases();
-        Debug.Log($"Low-level 2 content parent configured with spacing: {layout.spacing}");
     }
 
     private void InitializeHighLevelUI()
     {
         if (highLevelToggleButton == null || highLevelSettingsPanel == null || highLevelResetButton == null || variableEntryPrefab == null || highLevelContentParent == null)
         {
-            Debug.LogError("High-level UI components not assigned in PlayerSyncManager. Please check Inspector assignments.");
             return;
         }
 
@@ -566,7 +558,6 @@ public class PlayerSyncManager : MonoBehaviour
 
             if (nameField == null || valueField == null || plusButton == null || minusButton == null)
             {
-                Debug.LogError($"High-level variable entry prefab missing required components for {config.Name}. Ensure NameField, ValueField, PlusButton, and MinusButton exist.");
                 continue;
             }
 
@@ -617,14 +608,12 @@ public class PlayerSyncManager : MonoBehaviour
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
         Canvas.ForceUpdateCanvases();
-        Debug.Log($"High-level content parent configured with spacing: {layout.spacing}");
     }
 
     private void InitializeDiagnosticsUI()
     {
         if (diagnosticsToggleButton == null || diagnosticsPanel == null || diagnosticsEntryPrefab == null || diagnosticsContentParent == null)
         {
-            Debug.LogError("Diagnostics UI components not assigned in PlayerSyncManager. Please check Inspector assignments.");
             return;
         }
 
@@ -666,14 +655,12 @@ public class PlayerSyncManager : MonoBehaviour
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
         Canvas.ForceUpdateCanvases();
-        Debug.Log($"Diagnostics content parent configured with spacing: {layout.spacing}");
     }
 
     private void InitializeHzToggle()
     {
         if (hzToggleButton == null)
         {
-            Debug.LogError("Hz toggle button not assigned in PlayerSyncManager. Please check Inspector assignments.");
             return;
         }
 
@@ -732,7 +719,6 @@ public class PlayerSyncManager : MonoBehaviour
         {
             RectTransform panelRect = lowLevelSettingsPanel1.GetComponent<RectTransform>();
             panelRect.anchoredPosition = Vector2.zero;
-            Debug.Log("Low-level settings panel 1 activated. Position: " + panelRect.anchoredPosition);
         }
     }
 
@@ -747,7 +733,6 @@ public class PlayerSyncManager : MonoBehaviour
         {
             RectTransform panelRect = lowLevelSettingsPanel2.GetComponent<RectTransform>();
             panelRect.anchoredPosition = Vector2.zero;
-            Debug.Log("Low-level settings panel 2 activated. Position: " + panelRect.anchoredPosition);
         }
     }
 
@@ -762,7 +747,6 @@ public class PlayerSyncManager : MonoBehaviour
         {
             RectTransform panelRect = highLevelSettingsPanel.GetComponent<RectTransform>();
             panelRect.anchoredPosition = Vector2.zero;
-            Debug.Log("High-level settings panel activated. Position: " + panelRect.anchoredPosition);
         }
     }
 
@@ -777,7 +761,6 @@ public class PlayerSyncManager : MonoBehaviour
         {
             RectTransform panelRect = diagnosticsPanel.GetComponent<RectTransform>();
             panelRect.anchoredPosition = Vector2.zero;
-            Debug.Log("Diagnostics panel activated. Position: " + panelRect.anchoredPosition);
             UpdateDiagnosticsUI();
         }
     }
@@ -807,14 +790,13 @@ public class PlayerSyncManager : MonoBehaviour
         UpdateHzModeParameters();
         UpdateHzButtonText();
         UpdateUIValues();
-        Debug.Log($"Switched to {(is120Hz ? "120Hz" : "60Hz")} mode.");
     }
 
     private void UpdateHzModeParameters()
     {
         if (is120Hz)
         {
-            updateInterval = 0.0083f; // ~120Hz
+            updateInterval = 0.0083f;
             inputSmoothing = 0.18f;
             baseInterpTime = 0.048f;
             baseJitterBufferDelay = 0.008f;
@@ -824,13 +806,13 @@ public class PlayerSyncManager : MonoBehaviour
         }
         else
         {
-            updateInterval = 0.0167f; // ~60Hz
-            inputSmoothing = 0.36f; // Double for slower updates
-            baseInterpTime = 0.096f; // Double for smoother interpolation
-            baseJitterBufferDelay = 0.016f; // Double for longer frame time
-            minStateBufferSize = 2f; // Reduce buffer size
+            updateInterval = 0.0167f;
+            inputSmoothing = 0.36f;
+            baseInterpTime = 0.096f;
+            baseJitterBufferDelay = 0.016f;
+            minStateBufferSize = 2f;
             maxStateBufferSize = 4f;
-            maxExtrapolationTime = 0.2f; // Increase for longer prediction
+            maxExtrapolationTime = 0.2f;
         }
     }
 
@@ -840,10 +822,6 @@ public class PlayerSyncManager : MonoBehaviour
         if (buttonText != null)
         {
             buttonText.text = is120Hz ? "120Hz" : "60Hz";
-        }
-        else
-        {
-            Debug.LogWarning("Hz toggle button missing Text component.");
         }
     }
 
@@ -917,7 +895,6 @@ public class PlayerSyncManager : MonoBehaviour
             Text textField = entry.GetComponentInChildren<Text>();
             if (textField == null)
             {
-                Debug.LogError($"Diagnostics entry prefab missing Text component for player {id}.");
                 continue;
             }
 
@@ -938,6 +915,8 @@ public class PlayerSyncManager : MonoBehaviour
                              $"Current FPS: {diagnostics.CurrentFPS:F2}\n" +
                              $"Active Correction Strength: {diagnostics.CurrentCorrectionStrength:F4}\n" +
                              $"Current Base Interp Time: {diagnostics.CurrentBaseInterpTime:F4}\n" +
+                             $"Replay Correction Count: {diagnostics.ReplayCorrectionCount}\n" +
+                             $"Last Replay Time: {diagnostics.LastReplayTime:F4}\n" +
                              $"Last Update Time: {diagnostics.LastUpdateTime:F4}";
             diagnosticsTextFields.Add(textField);
         }
@@ -1012,7 +991,9 @@ public class PlayerSyncManager : MonoBehaviour
                     NoPacketFrames = 0,
                     CurrentFPS = currentFPS,
                     CurrentCorrectionStrength = baseCorrectionSmoothing,
-                    CurrentBaseInterpTime = baseInterpTime
+                    CurrentBaseInterpTime = baseInterpTime,
+                    ReplayCorrectionCount = 0,
+                    LastReplayTime = 0f
                 };
             }
 
@@ -1079,7 +1060,6 @@ public class PlayerSyncManager : MonoBehaviour
         float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f;
         var diagnostics = playerDiagnostics[id];
 
-        // Initialize auto-adjusted values
         if (!autoAdjustedInterpTime.ContainsKey(id))
             autoAdjustedInterpTime[id] = baseInterpTime;
         if (!autoAdjustedCorrectionSmoothing.ContainsKey(id))
@@ -1089,68 +1069,58 @@ public class PlayerSyncManager : MonoBehaviour
         if (!autoAdjustedVelocitySmoothing.ContainsKey(id))
             autoAdjustedVelocitySmoothing[id] = baseVelocitySmoothing;
 
-        // Target values for auto-adjustments
         float targetInterpTime = baseInterpTime;
         float targetCorrectionSmoothing = baseCorrectionSmoothing;
         float targetPredictionFactor = basePredictionFactor;
         float targetVelocitySmoothing = baseVelocitySmoothing;
         float targetJitterBufferDelay = is120Hz ? 0.008f : 0.016f;
 
-        // RTT > 150ms
         if (rtt > AUTO_RTT_THRESHOLD)
         {
             targetInterpTime = baseInterpTime * 1.5f;
             targetCorrectionSmoothing = baseCorrectionSmoothing * 1.3f;
         }
 
-        // Desync > 1.5x tolerance
         if (desyncDistance > positionTolerance * AUTO_DESYNC_MULTIPLIER * desyncToleranceMultiplier)
         {
             targetCorrectionSmoothing *= AUTO_CORRECTION_BOOST;
             targetPredictionFactor = basePredictionFactor * 0.5f;
         }
 
-        // FPS < 30
         if (currentFPS < AUTO_FPS_THRESHOLD)
         {
             targetCorrectionSmoothing *= AUTO_SMOOTHING_REDUCTION;
             targetInterpTime *= AUTO_SMOOTHING_REDUCTION;
         }
 
-        // No packets in X frames
-        if (diagnostics.NoPacketFrames > AUTO_NO_PACKET_THRESHOLD)
+        if (diagnostics.NoPacketFrames > AUTO_NO_PACKET_THRESHOLD || rtt > LAG_SPIKE_RTT_THRESHOLD)
         {
             if (otherPlayers.ContainsKey(id) && targetStates.ContainsKey(id))
             {
-                otherPlayers[id].transform.position = targetStates[id].Position;
-                otherPlayers[id].transform.rotation = Quaternion.Euler(0, 0, targetStates[id].Rotation);
-                currentStates[id] = targetStates[id];
-                diagnostics.TeleportCount++;
+                StartCoroutine(HandleReplayCorrection(id));
+                diagnostics.ReplayCorrectionCount++;
+                diagnostics.LastReplayTime = Time.time;
                 diagnostics.NoPacketFrames = 0;
                 playerDiagnostics[id] = diagnostics;
             }
         }
 
-        // Dynamic jitter buffer
         float jitterBufferScale = Mathf.Lerp(1f, 2f, rtt / 0.3f);
         targetJitterBufferDelay *= jitterBufferScale;
 
-        // Smooth transitions with Lerp
-        float smoothingSpeed = 5f; // Adjusts how quickly values converge
+        float smoothingSpeed = 5f;
         autoAdjustedInterpTime[id] = Mathf.Lerp(autoAdjustedInterpTime[id], targetInterpTime, Time.deltaTime * smoothingSpeed);
         autoAdjustedCorrectionSmoothing[id] = Mathf.Lerp(autoAdjustedCorrectionSmoothing[id], targetCorrectionSmoothing, Time.deltaTime * smoothingSpeed);
         autoAdjustedPredictionFactor[id] = Mathf.Lerp(autoAdjustedPredictionFactor[id], targetPredictionFactor, Time.deltaTime * smoothingSpeed);
         autoAdjustedVelocitySmoothing[id] = Mathf.Lerp(autoAdjustedVelocitySmoothing[id], targetVelocitySmoothing, Time.deltaTime * smoothingSpeed);
         baseJitterBufferDelay = Mathf.Lerp(baseJitterBufferDelay, targetJitterBufferDelay, Time.deltaTime * smoothingSpeed);
 
-        // Clamp dynamic values
         autoAdjustedInterpTime[id] = Mathf.Clamp(autoAdjustedInterpTime[id], minInterpTime, baseInterpTime * 2f);
         autoAdjustedCorrectionSmoothing[id] = Mathf.Clamp(autoAdjustedCorrectionSmoothing[id], 0.1f, 2f);
         autoAdjustedPredictionFactor[id] = Mathf.Clamp(autoAdjustedPredictionFactor[id], 0.01f, basePredictionFactor * 1.5f);
         autoAdjustedVelocitySmoothing[id] = Mathf.Clamp(autoAdjustedVelocitySmoothing[id], 0.1f, baseVelocitySmoothing * 1.5f);
         baseJitterBufferDelay = Mathf.Clamp(baseJitterBufferDelay, 0.004f, 0.1f);
 
-        // Update diagnostics with current auto-tuner values
         diagnostics.CurrentCorrectionStrength = autoAdjustedCorrectionSmoothing[id];
         diagnostics.CurrentBaseInterpTime = autoAdjustedInterpTime[id];
         playerDiagnostics[id] = diagnostics;
@@ -1416,7 +1386,7 @@ public class PlayerSyncManager : MonoBehaviour
                         if (desyncDistance > reCorrectionThreshold)
                         {
                             newPos = predictedPos;
-                            otherPlayers[id].transform.position = predictedPos;
+                            otherPlayers[id].transform.rotation = Quaternion.Euler(0, 0, target.Rotation);
                             currentStates[id] = target;
                             lastDesyncTimes[id] = Time.time;
                             lastCorrectionTimes[id] = Time.time;
@@ -1514,7 +1484,7 @@ public class PlayerSyncManager : MonoBehaviour
         {
             elapsed += Time.deltaTime;
             float t = elapsed / lerpTime;
-            t = t * t * (3f - 2f * t); // Smoothstep
+            t = t * t * (3f - 2f * t);
             playerPosition = Vector3.Lerp(startPosition, targetPosition, t);
             playerRotation = Quaternion.Slerp(startRotation, targetRotationQuat, t).eulerAngles.z;
             localPlayer.transform.position = playerPosition;
@@ -1530,6 +1500,57 @@ public class PlayerSyncManager : MonoBehaviour
         lastSentRotation = targetRotation;
         baseRotation = targetRotation;
         isFacingBackward = false;
+    }
+
+    private IEnumerator HandleReplayCorrection(int id)
+    {
+        if (!replayBuffers.ContainsKey(id) || replayBuffers[id].Count < 2 || !otherPlayers.ContainsKey(id) || !targetStates.ContainsKey(id))
+        {
+            yield break;
+        }
+
+        var buffer = replayBuffers[id];
+        var targetState = targetStates[id];
+        GameObject player = otherPlayers[id];
+
+        float replayStartTime = Time.time;
+        float replayDuration = Mathf.Min(0.5f, REPLAY_BUFFER_DURATION / 2f);
+        float elapsed = 0f;
+
+        while (buffer.Count > 1 && elapsed < replayDuration)
+        {
+            var (startPos, startRot, startTime) = buffer.Peek();
+            var (nextPos, nextRot, nextTime) = buffer.ToArray()[1];
+
+            float t = (Time.time - startTime) / (nextTime - startTime);
+            t = Mathf.Clamp01(t);
+
+            Vector3 interpolatedPos = Vector3.Lerp(startPos, nextPos, t);
+            float interpolatedRot = Mathf.LerpAngle(startRot, nextRot, t);
+
+            player.transform.position = Vector3.Lerp(player.transform.position, interpolatedPos, Time.deltaTime * REPLAY_LERP_SPEED);
+            player.transform.rotation = Quaternion.Slerp(
+                player.transform.rotation,
+                Quaternion.Euler(0, 0, interpolatedRot),
+                Time.deltaTime * REPLAY_LERP_SPEED);
+
+            elapsed += Time.deltaTime;
+
+            if (Time.time >= nextTime)
+            {
+                buffer.Dequeue();
+            }
+
+            yield return null;
+        }
+
+        player.transform.position = Vector3.Lerp(player.transform.position, targetState.Position, Time.deltaTime * REPLAY_LERP_SPEED);
+        player.transform.rotation = Quaternion.Slerp(
+            player.transform.rotation,
+            Quaternion.Euler(0, 0, targetState.Rotation),
+            Time.deltaTime * REPLAY_LERP_SPEED);
+
+        currentStates[id] = targetStates[id];
     }
 
     public void UpdatePlayerPosition(int id, Vector3 position, float rotation, float serverTimestamp = 0f)
@@ -1556,7 +1577,7 @@ public class PlayerSyncManager : MonoBehaviour
             autoAdjustedVelocitySmoothing.ContainsKey(id) ? autoAdjustedVelocitySmoothing[id] * 0.5f : baseVelocitySmoothing * 0.5f,
             autoAdjustedVelocitySmoothing.ContainsKey(id) ? autoAdjustedVelocitySmoothing[id] * 1.5f : baseVelocitySmoothing * 1.5f,
             rtt / 0.2f);
-        velocitySmoothing = Mathf.Clamp(velocitySmoothing, 0.1f, baseVelocitySmoothing * 1.5f); // Clamp dynamic value
+        velocitySmoothing = Mathf.Clamp(velocitySmoothing, 0.1f, baseVelocitySmoothing * 1.5f);
 
         Vector3 velocity = Vector3.zero;
         if (targetStates.ContainsKey(id))
@@ -1612,6 +1633,16 @@ public class PlayerSyncManager : MonoBehaviour
         while (stateBuffers[id].Count > targetBufferSize)
         {
             stateBuffers[id].Dequeue();
+        }
+
+        if (!replayBuffers.ContainsKey(id))
+        {
+            replayBuffers[id] = new Queue<(Vector3, float, float)>();
+        }
+        replayBuffers[id].Enqueue((position, rotation, Time.time));
+        while (replayBuffers[id].Count > 0 && Time.time - replayBuffers[id].Peek().Timestamp > REPLAY_BUFFER_DURATION)
+        {
+            replayBuffers[id].Dequeue();
         }
 
         lastPacketTimes[id] = Time.time;
@@ -1699,6 +1730,8 @@ public class PlayerSyncManager : MonoBehaviour
         targetStates[id] = initialState;
         stateBuffers[id] = new Queue<PlayerState>();
         stateBuffers[id].Enqueue(initialState);
+        replayBuffers[id] = new Queue<(Vector3, float, float)>();
+        replayBuffers[id].Enqueue((initialState.Position, initialState.Rotation, Time.time));
         estimatedRTT[id] = 0.08f;
         lastPacketTimes[id] = Time.time;
 
@@ -1720,10 +1753,11 @@ public class PlayerSyncManager : MonoBehaviour
             NoPacketFrames = 0,
             CurrentFPS = currentFPS,
             CurrentCorrectionStrength = baseCorrectionSmoothing,
-            CurrentBaseInterpTime = baseInterpTime
+            CurrentBaseInterpTime = baseInterpTime,
+            ReplayCorrectionCount = 0,
+            LastReplayTime = 0f
         };
 
-        // Initialize auto-adjusted values
         autoAdjustedInterpTime[id] = baseInterpTime;
         autoAdjustedCorrectionSmoothing[id] = baseCorrectionSmoothing;
         autoAdjustedPredictionFactor[id] = basePredictionFactor;
@@ -1736,6 +1770,7 @@ public class PlayerSyncManager : MonoBehaviour
         currentStates.Remove(id);
         targetStates.Remove(id);
         stateBuffers.Remove(id);
+        replayBuffers.Remove(id);
         estimatedRTT.Remove(id);
         lastPacketTimes.Remove(id);
         lastDesyncTimes.Remove(id);
