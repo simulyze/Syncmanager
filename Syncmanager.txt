@@ -3,6 +3,7 @@ using UnityEngine.UI;
 using System.Collections.Generic;
 using System.Collections;
 using System;
+using UnityEngine.EventSystems;
 
 public class PlayerSyncManager : MonoBehaviour
 {
@@ -16,7 +17,7 @@ public class PlayerSyncManager : MonoBehaviour
     }
 
     // === Multiplayer Sync & Smoothing Variables ===
-    [SerializeField] public float updateInterval = 0.0083f; // Default: ~120Hz
+    [SerializeField] public float updateInterval = 0.0083f; // ~120Hz
     [SerializeField] public float positionTolerance = 0.015f;
     [SerializeField] public float rotationTolerance = 0.4f;
     [SerializeField] public float initialMoveDelay = 0.04f;
@@ -39,6 +40,18 @@ public class PlayerSyncManager : MonoBehaviour
     [SerializeField] public float desyncCorrectionTime = 0.25f;
     [SerializeField] public float velocityPredictionDamping = 0.5f;
     [SerializeField] public float extrapolationLimiter = 0.2f;
+    [SerializeField] public float maxCorrectionSpeed = 5.0f;
+    [SerializeField] public float correctionDamping = 0.9f;
+    [SerializeField] public float reCorrectionDelay = 0.5f;
+    [SerializeField] public float maxExtrapolationTime = 0.1f; // Clamps prediction time
+
+    // === High-Level Sync Variables ===
+    [SerializeField] public float maxCorrectionDistance = 1.0f;
+    [SerializeField] public float overCorrectionThreshold = 0.5f;
+    [SerializeField] public float reCorrectionThreshold = 0.3f;
+    [SerializeField] public float correctionAggressiveness = 0.7f;
+    [SerializeField] public float predictionAdjustmentFactor = 0.2f;
+    [SerializeField] public float desyncToleranceMultiplier = 1.5f;
 
     // === Game-Specific Variables ===
     [SerializeField] private float maxSpeed = 4.5f;
@@ -52,15 +65,32 @@ public class PlayerSyncManager : MonoBehaviour
     private const float HEALTH_BAR_OFFSET = 0.5f;
 
     // === UI Variables ===
-    [SerializeField] private Button toggleButton;
-    [SerializeField] private GameObject settingsPanel;
-    [SerializeField] private Button resetButton;
-    [SerializeField] private Button exitButton;
-    [SerializeField] private GameObject variableEntryPrefab; // Prefab with 2 InputFields, 2 Buttons
-    [SerializeField] private Transform contentParent; // ScrollView content
-    [SerializeField] private float entrySpacing = 15f; // Vertical spacing between prefab entries
-    [SerializeField] private DotShooter dotShooter; // Reference to DotShooter component
-    private bool isPanelActive = false;
+    [SerializeField] private Button toggleButton; // Low-level panel 1
+    [SerializeField] private GameObject lowLevelSettingsPanel1;
+    [SerializeField] private Button resetButton1;
+    [SerializeField] private GameObject variableEntryPrefab;
+    [SerializeField] private Transform contentParent1; // ScrollView for low-level panel 1
+    [SerializeField] private float entrySpacing = 15f;
+    [SerializeField] private DotShooter dotShooter;
+    [SerializeField] private Button diagnosticsToggleButton;
+    [SerializeField] private GameObject diagnosticsPanel;
+    [SerializeField] private Transform diagnosticsContentParent;
+    [SerializeField] private GameObject diagnosticsEntryPrefab;
+    [SerializeField] private float diagnosticsEntrySpacing = 15f;
+    [SerializeField] private Button highLevelToggleButton; // High-level panel
+    [SerializeField] private GameObject highLevelSettingsPanel;
+    [SerializeField] private Button highLevelResetButton;
+    [SerializeField] private Transform highLevelContentParent;
+    [SerializeField] private Button lowLevel2ToggleButton; // Low-level panel 2
+    [SerializeField] private GameObject lowLevelSettingsPanel2;
+    [SerializeField] private Button lowLevel2ResetButton;
+    [SerializeField] private Transform lowLevel2ContentParent;
+    [SerializeField] private Button hzToggleButton; // Toggle 120Hz/60Hz
+    private bool isLowLevelPanel1Active = false;
+    private bool isHighLevelPanelActive = false;
+    private bool isLowLevelPanel2Active = false;
+    private bool isDiagnosticsPanelActive = false;
+    private bool is120Hz = true; // Default to 120Hz
 
     // === Diagnostic Variables ===
     private struct PlayerDiagnostics
@@ -74,10 +104,29 @@ public class PlayerSyncManager : MonoBehaviour
         public int BufferUnderflowCount;
         public int BufferOverflowCount;
         public float LastUpdateTime;
+        public float LastCorrectionDistance;
+        public int CorrectionCount;
+        public float LastOverCorrectionDistance;
+        public int OverCorrectionCount;
+        public int NoPacketFrames;
+        public float CurrentFPS;
+        public float CurrentCorrectionStrength; // Auto-tuner display
+        public float CurrentBaseInterpTime; // Auto-tuner display
     }
 
     private Dictionary<int, PlayerDiagnostics> playerDiagnostics = new Dictionary<int, PlayerDiagnostics>();
-    private Dictionary<string, (string SuggestedAction, Color NameColor, Color PlusColor, Color MinusColor)> variableFeedback = new Dictionary<string, (string, Color, Color, Color)>();
+
+    // === Auto-Adaptive Variables ===
+    private Dictionary<int, float> autoAdjustedInterpTime = new Dictionary<int, float>();
+    private Dictionary<int, float> autoAdjustedCorrectionSmoothing = new Dictionary<int, float>();
+    private Dictionary<int, float> autoAdjustedPredictionFactor = new Dictionary<int, float>();
+    private Dictionary<int, float> autoAdjustedVelocitySmoothing = new Dictionary<int, float>();
+    private const float AUTO_DESYNC_MULTIPLIER = 1.5f;
+    private const float AUTO_CORRECTION_BOOST = 1.2f;
+    private const float AUTO_SMOOTHING_REDUCTION = 0.7f;
+    private const int AUTO_NO_PACKET_THRESHOLD = 60; // Frames without packets
+    private const float AUTO_RTT_THRESHOLD = 0.15f; // 150ms
+    private const float AUTO_FPS_THRESHOLD = 30f;
 
     private struct VariableConfig
     {
@@ -90,11 +139,22 @@ public class PlayerSyncManager : MonoBehaviour
         public Func<float> Getter;
     }
 
-    private List<VariableConfig> variableConfigs = new List<VariableConfig>();
-    private List<InputField> valueInputFields = new List<InputField>();
-    private List<InputField> nameInputFields = new List<InputField>();
-    private List<Button> plusButtons = new List<Button>();
-    private List<Button> minusButtons = new List<Button>();
+    private List<VariableConfig> lowLevelVariableConfigs1 = new List<VariableConfig>();
+    private List<VariableConfig> lowLevelVariableConfigs2 = new List<VariableConfig>();
+    private List<VariableConfig> highLevelVariableConfigs = new List<VariableConfig>();
+    private List<InputField> lowLevel1ValueInputFields = new List<InputField>();
+    private List<InputField> lowLevel1NameInputFields = new List<InputField>();
+    private List<Button> lowLevel1PlusButtons = new List<Button>();
+    private List<Button> lowLevel1MinusButtons = new List<Button>();
+    private List<InputField> lowLevel2ValueInputFields = new List<InputField>();
+    private List<InputField> lowLevel2NameInputFields = new List<InputField>();
+    private List<Button> lowLevel2PlusButtons = new List<Button>();
+    private List<Button> lowLevel2MinusButtons = new List<Button>();
+    private List<InputField> highLevelValueInputFields = new List<InputField>();
+    private List<InputField> highLevelNameInputFields = new List<InputField>();
+    private List<Button> highLevelPlusButtons = new List<Button>();
+    private List<Button> highLevelMinusButtons = new List<Button>();
+    private List<Text> diagnosticsTextFields = new List<Text>();
 
     private Joystick joystick;
     private GameNetworkManager networkManager;
@@ -125,6 +185,16 @@ public class PlayerSyncManager : MonoBehaviour
     private Dictionary<int, Queue<PlayerState>> stateBuffers = new Dictionary<int, Queue<PlayerState>>();
     private Dictionary<int, float> lastPacketTimes = new Dictionary<int, float>();
     private Dictionary<int, float> lastDesyncTimes = new Dictionary<int, float>();
+    private Dictionary<int, float> lastCorrectionTimes = new Dictionary<int, float>();
+    private float lastFPSCheckTime;
+    private int frameCounter;
+    private float currentFPS;
+
+    // Drag handling variables
+    private Vector2 dragStartPosition;
+    private bool isDragging = false;
+    private InputField draggedInputField;
+    private VariableConfig draggedConfig;
 
     public static PlayerSyncManager Instance { get; private set; }
 
@@ -142,37 +212,42 @@ public class PlayerSyncManager : MonoBehaviour
     void Start()
     {
         networkManager = GameNetworkManager.Instance;
-        dotShooter = FindObjectOfType<DotShooter>();
+        dotShooter = FindFirstObjectByType<DotShooter>();
         smoothedInput = Vector2.zero;
         lastInput = Vector2.zero;
-        InitializeUI();
+        lastFPSCheckTime = Time.time;
+        frameCounter = 0;
+        currentFPS = 120f;
+        InitializeLowLevelUI1();
+        InitializeLowLevelUI2();
+        InitializeHighLevelUI();
+        InitializeDiagnosticsUI();
+        InitializeHzToggle();
     }
 
-    private void InitializeUI()
+    private void InitializeLowLevelUI1()
     {
-        if (toggleButton == null || settingsPanel == null || resetButton == null || exitButton == null || variableEntryPrefab == null || contentParent == null)
+        if (toggleButton == null || lowLevelSettingsPanel1 == null || resetButton1 == null || variableEntryPrefab == null || contentParent1 == null)
         {
-            Debug.LogError("UI components not assigned in PlayerSyncManager. Please check Inspector assignments.");
+            Debug.LogError("Low-level UI 1 components not assigned in PlayerSyncManager. Please check Inspector assignments.");
             return;
         }
 
-        settingsPanel.SetActive(false);
-        toggleButton.onClick.AddListener(ToggleSettingsPanel);
-        exitButton.onClick.AddListener(() => settingsPanel.SetActive(false));
-        -1);
-        resetButton.onClick.AddListener(ResetToDefaults);
+        lowLevelSettingsPanel1.SetActive(false);
+        toggleButton.onClick.AddListener(ToggleLowLevelSettingsPanel1);
+        resetButton1.onClick.AddListener(ResetLowLevel1ToDefaults);
 
-        RectTransform contentRect = contentParent.GetComponent<RectTransform>();
+        RectTransform contentRect = contentParent1.GetComponent<RectTransform>();
         contentRect.anchorMin = new Vector2(0, 1);
         contentRect.anchorMax = new Vector2(1, 1);
         contentRect.pivot = new Vector2(0.5f, 1);
         contentRect.anchoredPosition = Vector2.zero;
         contentRect.sizeDelta = new Vector2(0, contentRect.sizeDelta.y);
 
-        VerticalLayoutGroup layout = contentParent.GetComponent<VerticalLayoutGroup>();
+        VerticalLayoutGroup layout = contentParent1.GetComponent<VerticalLayoutGroup>();
         if (!layout)
         {
-            layout = contentParent.gameObject.AddComponent<VerticalLayoutGroup>();
+            layout = contentParent1.gameObject.AddComponent<VerticalLayoutGroup>();
         }
         layout.childAlignment = TextAnchor.UpperLeft;
         layout.childForceExpandWidth = true;
@@ -180,51 +255,51 @@ public class PlayerSyncManager : MonoBehaviour
         layout.spacing = entrySpacing;
         layout.padding = new RectOffset(15, 15, 15, 15);
 
-        ContentSizeFitter fitter = contentParent.GetComponent<ContentSizeFitter>();
+        ContentSizeFitter fitter = contentParent1.GetComponent<ContentSizeFitter>();
         if (!fitter)
         {
-            fitter = contentParent.gameObject.AddComponent<ContentSizeFitter>();
+            fitter = contentParent1.gameObject.AddComponent<ContentSizeFitter>();
         }
         fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
-        variableConfigs = new List<VariableConfig>
+        lowLevelVariableConfigs1 = new List<VariableConfig>
         {
-            new VariableConfig { Name = "updateInterval", DefaultValue = 0.0083f, MinValue = 0.004f, MaxValue = 0.02f, Increment = 0.0001f, Setter = v => updateInterval = v, Getter = () => updateInterval },
-            new VariableConfig { Name = "positionTolerance", DefaultValue = 0.015f, MinValue = 0.005f, MaxValue = 0.1f, Increment = 0.001f, Setter = v => positionTolerance = v, Getter = () => positionTolerance },
-            new VariableConfig { Name = "rotationTolerance", DefaultValue = 0.4f, MinValue = 0.1f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => rotationTolerance = v, Getter = () => rotationTolerance },
-            new VariableConfig { Name = "teleportThreshold", DefaultValue = 2.0f, MinValue = 0.5f, MaxValue = 5.0f, Increment = 0.1f, Setter = v => teleportThreshold = v, Getter = () => teleportThreshold },
-            new VariableConfig { Name = "initialMoveDelay", DefaultValue = 0.04f, MinValue = 0.01f, MaxValue = 0.1f, Increment = 0.001f, Setter = v => initialMoveDelay = v, Getter = () => initialMoveDelay },
-            new VariableConfig { Name = "initialCorrectGracePeriod", DefaultValue = 0.05f, MinValue = 0.01f, MaxValue = 0.1f, Increment = 0.001f, Setter = v => initialCorrectGracePeriod = v, Getter = () => initialCorrectGracePeriod },
-            new VariableConfig { Name = "movementThreshold", DefaultValue = 0.002f, MinValue = 0.0005f, MaxValue = 0.01f, Increment = 0.0001f, Setter = v => movementThreshold = v, Getter = () => movementThreshold },
-            new VariableConfig { Name = "minMoveDistance", DefaultValue = 0.0015f, MinValue = 0.0005f, MaxValue = 0.01f, Increment = 0.0001f, Setter = v => minMoveDistance = v, Getter = () => minMoveDistance },
-            new VariableConfig { Name = "minRotationAngle", DefaultValue = 0.08f, MinValue = 0.05f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => minRotationAngle = v, Getter = () => minRotationAngle },
-            new VariableConfig { Name = "inputSmoothing", DefaultValue = 0.18f, MinValue = 0.05f, MaxValue = 0.5f, Increment = 0.01f, Setter = v => inputSmoothing = v, Getter = () => inputSmoothing },
-            new VariableConfig { Name = "baseInterpTime", DefaultValue = 0.048f, MinValue = 0.02f, MaxValue = 0.2f, Increment = 0.001f, Setter = v => baseInterpTime = v, Getter = () => baseInterpTime },
-            new VariableConfig { Name = "minInterpTime", DefaultValue = 0.01f, MinValue = 0.005f, MaxValue = 0.05f, Increment = 0.001f, Setter = v => minInterpTime = v, Getter = () => minInterpTime },
-            new VariableConfig { Name = "rotationDamping", DefaultValue = 0.95f, MinValue = 0.7f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => rotationDamping = v, Getter = () => rotationDamping },
-            new VariableConfig { Name = "basePredictionFactor", DefaultValue = 0.16f, MinValue = 0.05f, MaxValue = 0.5f, Increment = 0.01f, Setter = v => basePredictionFactor = v, Getter = () => basePredictionFactor },
-            new VariableConfig { Name = "baseVelocitySmoothing", DefaultValue = 0.29f, MinValue = 0.1f, MaxValue = 0.5f, Increment = 0.01f, Setter = v => baseVelocitySmoothing = v, Getter = () => baseVelocitySmoothing },
-            new VariableConfig { Name = "velocityPredictionDamping", DefaultValue = 0.5f, MinValue = 0f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => velocityPredictionDamping = v, Getter = () => velocityPredictionDamping },
-            new VariableConfig { Name = "extrapolationLimiter", DefaultValue = 0.2f, MinValue = 0.05f, MaxValue = 0.3f, Increment = 0.01f, Setter = v => extrapolationLimiter = v, Getter = () => extrapolationLimiter },
-            new VariableConfig { Name = "baseCorrectionSmoothing", DefaultValue = 0.88f, MinValue = 0.3f, MaxValue = 1.5f, Increment = 0.01f, Setter = v => baseCorrectionSmoothing = v, Getter = () => baseCorrectionSmoothing },
-            new VariableConfig { Name = "desyncCorrectionTime", DefaultValue = 0.25f, MinValue = 0.05f, MaxValue = 0.5f, Increment = 0.01f, Setter = v => desyncCorrectionTime = v, Getter = () => desyncCorrectionTime },
-            new VariableConfig { Name = "baseJitterBufferDelay", DefaultValue = 0.008f, MinValue = 0.005f, MaxValue = 0.05f, Increment = 0.001f, Setter = v => baseJitterBufferDelay = v, Getter = () => baseJitterBufferDelay },
-            new VariableConfig { Name = "minStateBufferSize", DefaultValue = 3f, MinValue = 2f, MaxValue = 4f, Increment = 1f, Setter = v => minStateBufferSize = v, Getter = () => minStateBufferSize },
-            new VariableConfig { Name = "maxStateBufferSize", DefaultValue = 5f, MinValue = 4f, MaxValue = 8f, Increment = 1f, Setter = v => maxStateBufferSize = v, Getter = () => maxStateBufferSize }
+            new VariableConfig { Name = "updateInterval", DefaultValue = 0.0083f, MinValue = 0.0001f, MaxValue = 1.0f, Increment = 0.0001f, Setter = v => updateInterval = v, Getter = () => updateInterval },
+            new VariableConfig { Name = "positionTolerance", DefaultValue = 0.015f, MinValue = 0.0001f, MaxValue = 10.0f, Increment = 0.001f, Setter = v => positionTolerance = v, Getter = () => positionTolerance },
+            new VariableConfig { Name = "rotationTolerance", DefaultValue = 0.4f, MinValue = 0.001f, MaxValue = 180.0f, Increment = 0.01f, Setter = v => rotationTolerance = v, Getter = () => rotationTolerance },
+            new VariableConfig { Name = "teleportThreshold", DefaultValue = 2.0f, MinValue = 0.01f, MaxValue = 100.0f, Increment = 0.1f, Setter = v => teleportThreshold = v, Getter = () => teleportThreshold },
+            new VariableConfig { Name = "initialMoveDelay", DefaultValue = 0.04f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.001f, Setter = v => initialMoveDelay = v, Getter = () => initialMoveDelay },
+            new VariableConfig { Name = "initialCorrectGracePeriod", DefaultValue = 0.05f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.001f, Setter = v => initialCorrectGracePeriod = v, Getter = () => initialCorrectGracePeriod },
+            new VariableConfig { Name = "movementThreshold", DefaultValue = 0.002f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.0001f, Setter = v => movementThreshold = v, Getter = () => movementThreshold },
+            new VariableConfig { Name = "minMoveDistance", DefaultValue = 0.0015f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.0001f, Setter = v => minMoveDistance = v, Getter = () => minMoveDistance },
+            new VariableConfig { Name = "minRotationAngle", DefaultValue = 0.08f, MinValue = 0.0f, MaxValue = 360.0f, Increment = 0.01f, Setter = v => minRotationAngle = v, Getter = () => minRotationAngle },
+            new VariableConfig { Name = "inputSmoothing", DefaultValue = 0.18f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => inputSmoothing = v, Getter = () => inputSmoothing },
+            new VariableConfig { Name = "baseInterpTime", DefaultValue = 0.048f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.001f, Setter = v => baseInterpTime = v, Getter = () => baseInterpTime },
+            new VariableConfig { Name = "minInterpTime", DefaultValue = 0.01f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.001f, Setter = v => minInterpTime = v, Getter = () => minInterpTime },
+            new VariableConfig { Name = "rotationDamping", DefaultValue = 0.95f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => rotationDamping = v, Getter = () => rotationDamping },
+            new VariableConfig { Name = "basePredictionFactor", DefaultValue = 0.16f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => basePredictionFactor = v, Getter = () => basePredictionFactor },
+            new VariableConfig { Name = "baseVelocitySmoothing", DefaultValue = 0.29f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => baseVelocitySmoothing = v, Getter = () => baseVelocitySmoothing },
+            new VariableConfig { Name = "velocityPredictionDamping", DefaultValue = 0.5f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => velocityPredictionDamping = v, Getter = () => velocityPredictionDamping },
+            new VariableConfig { Name = "extrapolationLimiter", DefaultValue = 0.2f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => extrapolationLimiter = v, Getter = () => extrapolationLimiter },
+            new VariableConfig { Name = "baseCorrectionSmoothing", DefaultValue = 0.88f, MinValue = 0.0f, MaxValue = 100.0f, Increment = 0.01f, Setter = v => baseCorrectionSmoothing = v, Getter = () => baseCorrectionSmoothing },
+            new VariableConfig { Name = "desyncCorrectionTime", DefaultValue = 0.25f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => desyncCorrectionTime = v, Getter = () => desyncCorrectionTime },
+            new VariableConfig { Name = "baseJitterBufferDelay", DefaultValue = 0.008f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.001f, Setter = v => baseJitterBufferDelay = v, Getter = () => baseJitterBufferDelay },
+            new VariableConfig { Name = "minStateBufferSize", DefaultValue = 3f, MinValue = 0f, MaxValue = 100f, Increment = 1f, Setter = v => minStateBufferSize = v, Getter = () => minStateBufferSize },
+            new VariableConfig { Name = "maxStateBufferSize", DefaultValue = 5f, MinValue = 0f, MaxValue = 1000f, Increment = 1f, Setter = v => maxStateBufferSize = v, Getter = () => maxStateBufferSize }
         };
 
-        foreach (Transform child in contentParent)
+        foreach (Transform child in contentParent1)
         {
             Destroy(child.gameObject);
         }
-        valueInputFields.Clear();
-        nameInputFields.Clear();
-        plusButtons.Clear();
-        minusButtons.Clear();
+        lowLevel1ValueInputFields.Clear();
+        lowLevel1NameInputFields.Clear();
+        lowLevel1PlusButtons.Clear();
+        lowLevel1MinusButtons.Clear();
 
-        foreach (var config in variableConfigs)
+        foreach (var config in lowLevelVariableConfigs1)
         {
-            GameObject entry = Instantiate(variableEntryPrefab, contentParent);
+            GameObject entry = Instantiate(variableEntryPrefab, contentParent1);
             RectTransform entryRect = entry.GetComponent<RectTransform>();
             entryRect.localScale = Vector3.one;
             entryRect.anchoredPosition3D = new Vector3(entryRect.anchoredPosition3D.x, entryRect.anchoredPosition3D.y, 0);
@@ -239,16 +314,16 @@ public class PlayerSyncManager : MonoBehaviour
 
             if (nameField == null || valueField == null || plusButton == null || minusButton == null)
             {
-                Debug.LogError($"Variable entry prefab missing required components for {config.Name}. Ensure NameField, ValueField, PlusButton, and MinusButton exist.");
+                Debug.LogError($"Low-level 1 variable entry prefab missing required components for {config.Name}. Ensure NameField, ValueField, PlusButton, and MinusButton exist.");
                 continue;
             }
 
             nameField.text = config.Name;
             nameField.interactable = false;
-            nameInputFields.Add(nameField);
+            lowLevel1NameInputFields.Add(nameField);
 
             valueField.text = config.Getter().ToString("F4");
-            valueInputFields.Add(valueField);
+            lowLevel1ValueInputFields.Add(valueField);
             valueField.onEndEdit.AddListener((value) =>
             {
                 if (float.TryParse(value, out float newValue))
@@ -262,6 +337,12 @@ public class PlayerSyncManager : MonoBehaviour
                     valueField.text = config.Getter().ToString("F4");
                 }
             });
+
+            EventTrigger nameTrigger = nameField.gameObject.AddComponent<EventTrigger>();
+            EventTrigger valueTrigger = valueField.gameObject.AddComponent<EventTrigger>();
+
+            AddDragEvents(nameTrigger, valueField, config);
+            AddDragEvents(valueTrigger, valueField, config);
 
             plusButton.onClick.AddListener(() =>
             {
@@ -278,27 +359,435 @@ public class PlayerSyncManager : MonoBehaviour
                 valueField.text = newValue.ToString("F4");
             });
 
-            plusButtons.Add(plusButton);
-            minusButtons.Add(minusButton);
-
-            // Initialize variable feedback
-            variableFeedback[config.Name] = ("None", Color.white, Color.gray, Color.gray);
+            lowLevel1PlusButtons.Add(plusButton);
+            lowLevel1MinusButtons.Add(minusButton);
         }
 
         LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
         Canvas.ForceUpdateCanvases();
-        Debug.Log($"Content parent configured with spacing: {layout.spacing}");
+        Debug.Log($"Low-level 1 content parent configured with spacing: {layout.spacing}");
     }
 
-    private void ToggleSettingsPanel()
+    private void InitializeLowLevelUI2()
     {
-        isPanelActive = !isPanelActive;
-        settingsPanel.SetActive(isPanelActive);
+        if (lowLevel2ToggleButton == null || lowLevelSettingsPanel2 == null || lowLevel2ResetButton == null || variableEntryPrefab == null || lowLevel2ContentParent == null)
+        {
+            Debug.LogError("Low-level UI 2 components not assigned in PlayerSyncManager. Please check Inspector assignments.");
+            return;
+        }
 
-        // Toggle DotShooter and PlayerMovement scripts
+        lowLevelSettingsPanel2.SetActive(false);
+        lowLevel2ToggleButton.onClick.AddListener(ToggleLowLevelSettingsPanel2);
+        lowLevel2ResetButton.onClick.AddListener(ResetLowLevel2ToDefaults);
+
+        RectTransform contentRect = lowLevel2ContentParent.GetComponent<RectTransform>();
+        contentRect.anchorMin = new Vector2(0, 1);
+        contentRect.anchorMax = new Vector2(1, 1);
+        contentRect.pivot = new Vector2(0.5f, 1);
+        contentRect.anchoredPosition = Vector2.zero;
+        contentRect.sizeDelta = new Vector2(0, contentRect.sizeDelta.y);
+
+        VerticalLayoutGroup layout = lowLevel2ContentParent.GetComponent<VerticalLayoutGroup>();
+        if (!layout)
+        {
+            layout = lowLevel2ContentParent.gameObject.AddComponent<VerticalLayoutGroup>();
+        }
+        layout.childAlignment = TextAnchor.UpperLeft;
+        layout.childForceExpandWidth = true;
+        layout.childForceExpandHeight = false;
+        layout.spacing = entrySpacing;
+        layout.padding = new RectOffset(15, 15, 15, 15);
+
+        ContentSizeFitter fitter = lowLevel2ContentParent.GetComponent<ContentSizeFitter>();
+        if (!fitter)
+        {
+            fitter = lowLevel2ContentParent.gameObject.AddComponent<ContentSizeFitter>();
+        }
+        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+        lowLevelVariableConfigs2 = new List<VariableConfig>
+        {
+            new VariableConfig { Name = "maxCorrectionSpeed", DefaultValue = 5.0f, MinValue = 0.1f, MaxValue = 20.0f, Increment = 0.1f, Setter = v => maxCorrectionSpeed = v, Getter = () => maxCorrectionSpeed },
+            new VariableConfig { Name = "correctionDamping", DefaultValue = 0.9f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => correctionDamping = v, Getter = () => correctionDamping },
+            new VariableConfig { Name = "reCorrectionDelay", DefaultValue = 0.5f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.01f, Setter = v => reCorrectionDelay = v, Getter = () => reCorrectionDelay },
+            new VariableConfig { Name = "maxExtrapolationTime", DefaultValue = 0.1f, MinValue = 0.01f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => maxExtrapolationTime = v, Getter = () => maxExtrapolationTime }
+        };
+
+        foreach (Transform child in lowLevel2ContentParent)
+        {
+            Destroy(child.gameObject);
+        }
+        lowLevel2ValueInputFields.Clear();
+        lowLevel2NameInputFields.Clear();
+        lowLevel2PlusButtons.Clear();
+        lowLevel2MinusButtons.Clear();
+
+        foreach (var config in lowLevelVariableConfigs2)
+        {
+            GameObject entry = Instantiate(variableEntryPrefab, lowLevel2ContentParent);
+            RectTransform entryRect = entry.GetComponent<RectTransform>();
+            entryRect.localScale = Vector3.one;
+            entryRect.anchoredPosition3D = new Vector3(entryRect.anchoredPosition3D.x, entryRect.anchoredPosition3D.y, 0);
+            entryRect.anchorMin = new Vector2(0, 1);
+            entryRect.anchorMax = new Vector2(1, 1);
+            entryRect.pivot = new Vector2(0.5f, 1);
+
+            InputField nameField = entry.transform.Find("NameField")?.GetComponent<InputField>();
+            InputField valueField = entry.transform.Find("ValueField")?.GetComponent<InputField>();
+            Button plusButton = entry.transform.Find("PlusButton")?.GetComponent<Button>();
+            Button minusButton = entry.transform.Find("MinusButton")?.GetComponent<Button>();
+
+            if (nameField == null || valueField == null || plusButton == null || minusButton == null)
+            {
+                Debug.LogError($"Low-level 2 variable entry prefab missing required components for {config.Name}. Ensure NameField, ValueField, PlusButton, and MinusButton exist.");
+                continue;
+            }
+
+            nameField.text = config.Name;
+            nameField.interactable = false;
+            lowLevel2NameInputFields.Add(nameField);
+
+            valueField.text = config.Getter().ToString("F4");
+            lowLevel2ValueInputFields.Add(valueField);
+            valueField.onEndEdit.AddListener((value) =>
+            {
+                if (float.TryParse(value, out float newValue))
+                {
+                    newValue = Mathf.Clamp(newValue, config.MinValue, config.MaxValue);
+                    config.Setter(newValue);
+                    valueField.text = newValue.ToString("F4");
+                }
+                else
+                {
+                    valueField.text = config.Getter().ToString("F4");
+                }
+            });
+
+            EventTrigger nameTrigger = nameField.gameObject.AddComponent<EventTrigger>();
+            EventTrigger valueTrigger = valueField.gameObject.AddComponent<EventTrigger>();
+
+            AddDragEvents(nameTrigger, valueField, config);
+            AddDragEvents(valueTrigger, valueField, config);
+
+            plusButton.onClick.AddListener(() =>
+            {
+                float current = config.Getter();
+                float newValue = Mathf.Clamp(current + config.Increment, config.MinValue, config.MaxValue);
+                config.Setter(newValue);
+                valueField.text = newValue.ToString("F4");
+            });
+            minusButton.onClick.AddListener(() =>
+            {
+                float current = config.Getter();
+                float newValue = Mathf.Clamp(current - config.Increment, config.MinValue, config.MaxValue);
+                config.Setter(newValue);
+                valueField.text = newValue.ToString("F4");
+            });
+
+            lowLevel2PlusButtons.Add(plusButton);
+            lowLevel2MinusButtons.Add(minusButton);
+        }
+
+        LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
+        Canvas.ForceUpdateCanvases();
+        Debug.Log($"Low-level 2 content parent configured with spacing: {layout.spacing}");
+    }
+
+    private void InitializeHighLevelUI()
+    {
+        if (highLevelToggleButton == null || highLevelSettingsPanel == null || highLevelResetButton == null || variableEntryPrefab == null || highLevelContentParent == null)
+        {
+            Debug.LogError("High-level UI components not assigned in PlayerSyncManager. Please check Inspector assignments.");
+            return;
+        }
+
+        highLevelSettingsPanel.SetActive(false);
+        highLevelToggleButton.onClick.AddListener(ToggleHighLevelSettingsPanel);
+        highLevelResetButton.onClick.AddListener(ResetHighLevelToDefaults);
+
+        RectTransform contentRect = highLevelContentParent.GetComponent<RectTransform>();
+        contentRect.anchorMin = new Vector2(0, 1);
+        contentRect.anchorMax = new Vector2(1, 1);
+        contentRect.pivot = new Vector2(0.5f, 1);
+        contentRect.anchoredPosition = Vector2.zero;
+        contentRect.sizeDelta = new Vector2(0, contentRect.sizeDelta.y);
+
+        VerticalLayoutGroup layout = highLevelContentParent.GetComponent<VerticalLayoutGroup>();
+        if (!layout)
+        {
+            layout = highLevelContentParent.gameObject.AddComponent<VerticalLayoutGroup>();
+        }
+        layout.childAlignment = TextAnchor.UpperLeft;
+        layout.childForceExpandWidth = true;
+        layout.childForceExpandHeight = false;
+        layout.spacing = entrySpacing;
+        layout.padding = new RectOffset(15, 15, 15, 15);
+
+        ContentSizeFitter fitter = highLevelContentParent.GetComponent<ContentSizeFitter>();
+        if (!fitter)
+        {
+            fitter = highLevelContentParent.gameObject.AddComponent<ContentSizeFitter>();
+        }
+        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+        highLevelVariableConfigs = new List<VariableConfig>
+        {
+            new VariableConfig { Name = "maxCorrectionDistance", DefaultValue = 1.0f, MinValue = 0.1f, MaxValue = 10.0f, Increment = 0.1f, Setter = v => maxCorrectionDistance = v, Getter = () => maxCorrectionDistance },
+            new VariableConfig { Name = "overCorrectionThreshold", DefaultValue = 0.5f, MinValue = 0.01f, MaxValue = 5.0f, Increment = 0.01f, Setter = v => overCorrectionThreshold = v, Getter = () => overCorrectionThreshold },
+            new VariableConfig { Name = "reCorrectionThreshold", DefaultValue = 0.3f, MinValue = 0.01f, MaxValue = 5.0f, Increment = 0.01f, Setter = v => reCorrectionThreshold = v, Getter = () => reCorrectionThreshold },
+            new VariableConfig { Name = "correctionAggressiveness", DefaultValue = 0.7f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => correctionAggressiveness = v, Getter = () => correctionAggressiveness },
+            new VariableConfig { Name = "predictionAdjustmentFactor", DefaultValue = 0.2f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => predictionAdjustmentFactor = v, Getter = () => predictionAdjustmentFactor },
+            new VariableConfig { Name = "desyncToleranceMultiplier", DefaultValue = 1.5f, MinValue = 0.1f, MaxValue = 5.0f, Increment = 0.1f, Setter = v => desyncToleranceMultiplier = v, Getter = () => desyncToleranceMultiplier }
+        };
+
+        foreach (Transform child in highLevelContentParent)
+        {
+            Destroy(child.gameObject);
+        }
+        highLevelValueInputFields.Clear();
+        highLevelNameInputFields.Clear();
+        highLevelPlusButtons.Clear();
+        highLevelMinusButtons.Clear();
+
+        foreach (var config in highLevelVariableConfigs)
+        {
+            GameObject entry = Instantiate(variableEntryPrefab, highLevelContentParent);
+            RectTransform entryRect = entry.GetComponent<RectTransform>();
+            entryRect.localScale = Vector3.one;
+            entryRect.anchoredPosition3D = new Vector3(entryRect.anchoredPosition3D.x, entryRect.anchoredPosition3D.y, 0);
+            entryRect.anchorMin = new Vector2(0, 1);
+            entryRect.anchorMax = new Vector2(1, 1);
+            entryRect.pivot = new Vector2(0.5f, 1);
+
+            InputField nameField = entry.transform.Find("NameField")?.GetComponent<InputField>();
+            InputField valueField = entry.transform.Find("ValueField")?.GetComponent<InputField>();
+            Button plusButton = entry.transform.Find("PlusButton")?.GetComponent<Button>();
+            Button minusButton = entry.transform.Find("MinusButton")?.GetComponent<Button>();
+
+            if (nameField == null || valueField == null || plusButton == null || minusButton == null)
+            {
+                Debug.LogError($"High-level variable entry prefab missing required components for {config.Name}. Ensure NameField, ValueField, PlusButton, and MinusButton exist.");
+                continue;
+            }
+
+            nameField.text = config.Name;
+            nameField.interactable = false;
+            highLevelNameInputFields.Add(nameField);
+
+            valueField.text = config.Getter().ToString("F4");
+            highLevelValueInputFields.Add(valueField);
+            valueField.onEndEdit.AddListener((value) =>
+            {
+                if (float.TryParse(value, out float newValue))
+                {
+                    newValue = Mathf.Clamp(newValue, config.MinValue, config.MaxValue);
+                    config.Setter(newValue);
+                    valueField.text = newValue.ToString("F4");
+                }
+                else
+                {
+                    valueField.text = config.Getter().ToString("F4");
+                }
+            });
+
+            EventTrigger nameTrigger = nameField.gameObject.AddComponent<EventTrigger>();
+            EventTrigger valueTrigger = valueField.gameObject.AddComponent<EventTrigger>();
+
+            AddDragEvents(nameTrigger, valueField, config);
+            AddDragEvents(valueTrigger, valueField, config);
+
+            plusButton.onClick.AddListener(() =>
+            {
+                float current = config.Getter();
+                float newValue = Mathf.Clamp(current + config.Increment, config.MinValue, config.MaxValue);
+                config.Setter(newValue);
+                valueField.text = newValue.ToString("F4");
+            });
+            minusButton.onClick.AddListener(() =>
+            {
+                float current = config.Getter();
+                float newValue = Mathf.Clamp(current - config.Increment, config.MinValue, config.MaxValue);
+                config.Setter(newValue);
+                valueField.text = newValue.ToString("F4");
+            });
+
+            highLevelPlusButtons.Add(plusButton);
+            highLevelMinusButtons.Add(minusButton);
+        }
+
+        LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
+        Canvas.ForceUpdateCanvases();
+        Debug.Log($"High-level content parent configured with spacing: {layout.spacing}");
+    }
+
+    private void InitializeDiagnosticsUI()
+    {
+        if (diagnosticsToggleButton == null || diagnosticsPanel == null || diagnosticsEntryPrefab == null || diagnosticsContentParent == null)
+        {
+            Debug.LogError("Diagnostics UI components not assigned in PlayerSyncManager. Please check Inspector assignments.");
+            return;
+        }
+
+        diagnosticsPanel.SetActive(false);
+        diagnosticsToggleButton.onClick.AddListener(ToggleDiagnosticsPanel);
+
+        RectTransform contentRect = diagnosticsContentParent.GetComponent<RectTransform>();
+        contentRect.anchorMin = new Vector2(0, 1);
+        contentRect.anchorMax = new Vector2(1, 1);
+        contentRect.pivot = new Vector2(0.5f, 1);
+        contentRect.anchoredPosition = Vector2.zero;
+        contentRect.sizeDelta = new Vector2(0, contentRect.sizeDelta.y);
+
+        VerticalLayoutGroup layout = diagnosticsContentParent.GetComponent<VerticalLayoutGroup>();
+        if (!layout)
+        {
+            layout = diagnosticsContentParent.gameObject.AddComponent<VerticalLayoutGroup>();
+        }
+        layout.childAlignment = TextAnchor.UpperLeft;
+        layout.childForceExpandWidth = true;
+        layout.childForceExpandHeight = false;
+        layout.spacing = diagnosticsEntrySpacing;
+        layout.padding = new RectOffset(15, 15, 15, 15);
+
+        ContentSizeFitter fitter = diagnosticsContentParent.GetComponent<ContentSizeFitter>();
+        if (!fitter)
+        {
+            fitter = diagnosticsContentParent.gameObject.AddComponent<ContentSizeFitter>();
+        }
+        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+        foreach (Transform child in diagnosticsContentParent)
+        {
+            Destroy(child.gameObject);
+        }
+        diagnosticsTextFields.Clear();
+
+        UpdateDiagnosticsUI();
+
+        LayoutRebuilder.ForceRebuildLayoutImmediate(contentRect);
+        Canvas.ForceUpdateCanvases();
+        Debug.Log($"Diagnostics content parent configured with spacing: {layout.spacing}");
+    }
+
+    private void InitializeHzToggle()
+    {
+        if (hzToggleButton == null)
+        {
+            Debug.LogError("Hz toggle button not assigned in PlayerSyncManager. Please check Inspector assignments.");
+            return;
+        }
+
+        hzToggleButton.onClick.AddListener(ToggleHzMode);
+        UpdateHzModeParameters();
+        UpdateHzButtonText();
+    }
+
+    private void AddDragEvents(EventTrigger trigger, InputField valueField, VariableConfig config)
+    {
+        EventTrigger.Entry beginDragEntry = new EventTrigger.Entry { eventID = EventTriggerType.BeginDrag };
+        beginDragEntry.callback.AddListener((eventData) =>
+        {
+            dragStartPosition = ((PointerEventData)eventData).position;
+            isDragging = true;
+            draggedInputField = valueField;
+            draggedConfig = config;
+        });
+        trigger.triggers.Add(beginDragEntry);
+
+        EventTrigger.Entry dragEntry = new EventTrigger.Entry { eventID = EventTriggerType.Drag };
+        dragEntry.callback.AddListener((eventData) =>
+        {
+            if (isDragging && draggedInputField == valueField)
+            {
+                Vector2 currentPosition = ((PointerEventData)eventData).position;
+                float dragDistance = currentPosition.x - dragStartPosition.x;
+                float sensitivity = 50f;
+                float change = dragDistance / sensitivity * config.Increment;
+                float currentValue = config.Getter();
+                float newValue = Mathf.Clamp(currentValue + change, config.MinValue, config.MaxValue);
+                config.Setter(newValue);
+                valueField.text = newValue.ToString("F4");
+                dragStartPosition = currentPosition;
+            }
+        });
+        trigger.triggers.Add(dragEntry);
+
+        EventTrigger.Entry endDragEntry = new EventTrigger.Entry { eventID = EventTriggerType.EndDrag };
+        endDragEntry.callback.AddListener((eventData) =>
+        {
+            isDragging = false;
+            draggedInputField = null;
+        });
+        trigger.triggers.Add(endDragEntry);
+    }
+
+    private void ToggleLowLevelSettingsPanel1()
+    {
+        isLowLevelPanel1Active = !isLowLevelPanel1Active;
+        lowLevelSettingsPanel1.SetActive(isLowLevelPanel1Active);
+
+        UpdatePlayerInputState();
+
+        if (isLowLevelPanel1Active)
+        {
+            RectTransform panelRect = lowLevelSettingsPanel1.GetComponent<RectTransform>();
+            panelRect.anchoredPosition = Vector2.zero;
+            Debug.Log("Low-level settings panel 1 activated. Position: " + panelRect.anchoredPosition);
+        }
+    }
+
+    private void ToggleLowLevelSettingsPanel2()
+    {
+        isLowLevelPanel2Active = !isLowLevelPanel2Active;
+        lowLevelSettingsPanel2.SetActive(isLowLevelPanel2Active);
+
+        UpdatePlayerInputState();
+
+        if (isLowLevelPanel2Active)
+        {
+            RectTransform panelRect = lowLevelSettingsPanel2.GetComponent<RectTransform>();
+            panelRect.anchoredPosition = Vector2.zero;
+            Debug.Log("Low-level settings panel 2 activated. Position: " + panelRect.anchoredPosition);
+        }
+    }
+
+    private void ToggleHighLevelSettingsPanel()
+    {
+        isHighLevelPanelActive = !isHighLevelPanelActive;
+        highLevelSettingsPanel.SetActive(isHighLevelPanelActive);
+
+        UpdatePlayerInputState();
+
+        if (isHighLevelPanelActive)
+        {
+            RectTransform panelRect = highLevelSettingsPanel.GetComponent<RectTransform>();
+            panelRect.anchoredPosition = Vector2.zero;
+            Debug.Log("High-level settings panel activated. Position: " + panelRect.anchoredPosition);
+        }
+    }
+
+    private void ToggleDiagnosticsPanel()
+    {
+        isDiagnosticsPanelActive = !isDiagnosticsPanelActive;
+        diagnosticsPanel.SetActive(isDiagnosticsPanelActive);
+
+        UpdatePlayerInputState();
+
+        if (isDiagnosticsPanelActive)
+        {
+            RectTransform panelRect = diagnosticsPanel.GetComponent<RectTransform>();
+            panelRect.anchoredPosition = Vector2.zero;
+            Debug.Log("Diagnostics panel activated. Position: " + panelRect.anchoredPosition);
+            UpdateDiagnosticsUI();
+        }
+    }
+
+    private void UpdatePlayerInputState()
+    {
+        bool inputEnabled = !isLowLevelPanel1Active && !isHighLevelPanelActive && !isLowLevelPanel2Active && !isDiagnosticsPanelActive;
         if (dotShooter != null)
         {
-            dotShooter.enabled = !isPanelActive;
+            dotShooter.enabled = inputEnabled;
         }
 
         GameObject[] players = GameObject.FindGameObjectsWithTag("Player");
@@ -307,35 +796,154 @@ public class PlayerSyncManager : MonoBehaviour
             PlayerMovement movement = player.GetComponent<PlayerMovement>();
             if (movement != null)
             {
-                movement.enabled = !isPanelActive;
+                movement.enabled = inputEnabled;
             }
-        }
-
-        if (isPanelActive)
-        {
-            RectTransform panelRect = settingsPanel.GetComponent<RectTransform>();
-            panelRect.anchoredPosition = Vector2.zero;
-            Debug.Log("Settings panel activated. Position: " + panelRect.anchoredPosition);
-            UpdateVariableFeedbackUI();
         }
     }
 
-    private void ResetToDefaults()
+    private void ToggleHzMode()
     {
-        foreach (var config in variableConfigs)
+        is120Hz = !is120Hz;
+        UpdateHzModeParameters();
+        UpdateHzButtonText();
+        UpdateUIValues();
+        Debug.Log($"Switched to {(is120Hz ? "120Hz" : "60Hz")} mode.");
+    }
+
+    private void UpdateHzModeParameters()
+    {
+        if (is120Hz)
+        {
+            updateInterval = 0.0083f; // ~120Hz
+            inputSmoothing = 0.18f;
+            baseInterpTime = 0.048f;
+            baseJitterBufferDelay = 0.008f;
+            minStateBufferSize = 3f;
+            maxStateBufferSize = 5f;
+            maxExtrapolationTime = 0.1f;
+        }
+        else
+        {
+            updateInterval = 0.0167f; // ~60Hz
+            inputSmoothing = 0.36f; // Double for slower updates
+            baseInterpTime = 0.096f; // Double for smoother interpolation
+            baseJitterBufferDelay = 0.016f; // Double for longer frame time
+            minStateBufferSize = 2f; // Reduce buffer size
+            maxStateBufferSize = 4f;
+            maxExtrapolationTime = 0.2f; // Increase for longer prediction
+        }
+    }
+
+    private void UpdateHzButtonText()
+    {
+        Text buttonText = hzToggleButton.GetComponentInChildren<Text>();
+        if (buttonText != null)
+        {
+            buttonText.text = is120Hz ? "120Hz" : "60Hz";
+        }
+        else
+        {
+            Debug.LogWarning("Hz toggle button missing Text component.");
+        }
+    }
+
+    private void UpdateUIValues()
+    {
+        for (int i = 0; i < lowLevel1ValueInputFields.Count; i++)
+        {
+            lowLevel1ValueInputFields[i].text = lowLevelVariableConfigs1[i].Getter().ToString("F4");
+        }
+        for (int i = 0; i < lowLevel2ValueInputFields.Count; i++)
+        {
+            lowLevel2ValueInputFields[i].text = lowLevelVariableConfigs2[i].Getter().ToString("F4");
+        }
+    }
+
+    private void ResetLowLevel1ToDefaults()
+    {
+        foreach (var config in lowLevelVariableConfigs1)
         {
             config.Setter(config.DefaultValue);
         }
-        for (int i = 0; i < variableConfigs.Count; i++)
+        for (int i = 0; i < lowLevel1ValueInputFields.Count; i++)
         {
-            valueInputFields[i].text = variableConfigs[i].Getter().ToString("F4");
+            lowLevel1ValueInputFields[i].text = lowLevelVariableConfigs1[i].Getter().ToString("F4");
         }
-        // Reset variable feedback
-        foreach (var config in variableConfigs)
+    }
+
+    private void ResetLowLevel2ToDefaults()
+    {
+        foreach (var config in lowLevelVariableConfigs2)
         {
-            variableFeedback[config.Name] = ("None", Color.white, Color.gray, Color.gray);
+            config.Setter(config.DefaultValue);
         }
-        UpdateVariableFeedbackUI();
+        for (int i = 0; i < lowLevel2ValueInputFields.Count; i++)
+        {
+            lowLevel2ValueInputFields[i].text = lowLevelVariableConfigs2[i].Getter().ToString("F4");
+        }
+    }
+
+    private void ResetHighLevelToDefaults()
+    {
+        foreach (var config in highLevelVariableConfigs)
+        {
+            config.Setter(config.DefaultValue);
+        }
+        for (int i = 0; i < highLevelValueInputFields.Count; i++)
+        {
+            highLevelValueInputFields[i].text = highLevelVariableConfigs[i].Getter().ToString("F4");
+        }
+    }
+
+    private void UpdateDiagnosticsUI()
+    {
+        foreach (Transform child in diagnosticsContentParent)
+        {
+            Destroy(child.gameObject);
+        }
+        diagnosticsTextFields.Clear();
+
+        foreach (var id in playerDiagnostics.Keys)
+        {
+            var diagnostics = playerDiagnostics[id];
+            GameObject entry = Instantiate(diagnosticsEntryPrefab, diagnosticsContentParent);
+            RectTransform entryRect = entry.GetComponent<RectTransform>();
+            entryRect.localScale = Vector3.one;
+            entryRect.anchoredPosition3D = new Vector3(entryRect.anchoredPosition3D.x, entryRect.anchoredPosition3D.y, 0);
+            entryRect.anchorMin = new Vector2(0, 1);
+            entryRect.anchorMax = new Vector2(1, 1);
+            entryRect.pivot = new Vector2(0.5f, 1);
+
+            Text textField = entry.GetComponentInChildren<Text>();
+            if (textField == null)
+            {
+                Debug.LogError($"Diagnostics entry prefab missing Text component for player {id}.");
+                continue;
+            }
+
+            textField.text = $"Player {id}\n" +
+                             $"Last Desync Distance: {diagnostics.LastDesyncDistance:F4}\n" +
+                             $"Desync Count: {diagnostics.DesyncCount}\n" +
+                             $"Last Jitter: {diagnostics.LastJitter:F4}\n" +
+                             $"Jitter Count: {diagnostics.JitterCount}\n" +
+                             $"Teleport Count: {diagnostics.TeleportCount}\n" +
+                             $"Current RTT: {diagnostics.AverageRTT:F4}\n" +
+                             $"Buffer Underflow Count: {diagnostics.BufferUnderflowCount}\n" +
+                             $"Buffer Overflow Count: {diagnostics.BufferOverflowCount}\n" +
+                             $"Last Correction Distance: {diagnostics.LastCorrectionDistance:F4}\n" +
+                             $"Correction Count: {diagnostics.CorrectionCount}\n" +
+                             $"Last Over-Correction Distance: {diagnostics.LastOverCorrectionDistance:F4}\n" +
+                             $"Over-Correction Count: {diagnostics.OverCorrectionCount}\n" +
+                             $"No Packet Frames: {diagnostics.NoPacketFrames}\n" +
+                             $"Current FPS: {diagnostics.CurrentFPS:F2}\n" +
+                             $"Active Correction Strength: {diagnostics.CurrentCorrectionStrength:F4}\n" +
+                             $"Current Base Interp Time: {diagnostics.CurrentBaseInterpTime:F4}\n" +
+                             $"Last Update Time: {diagnostics.LastUpdateTime:F4}";
+            diagnosticsTextFields.Add(textField);
+        }
+
+        LayoutRebuilder.ForceRebuildLayoutImmediate(diagnosticsContentParent.GetComponent<RectTransform>());
+        Canvas.ForceUpdateCanvases();
     }
 
     public void InitializeLocalPlayer(GameObject localPlayer, Vector3 position, float rotation)
@@ -361,9 +969,21 @@ public class PlayerSyncManager : MonoBehaviour
             return;
         }
 
+        UpdateFPS();
         UpdateLocalPlayerMovement();
         UpdateOtherPlayers();
         UpdateDiagnostics();
+    }
+
+    private void UpdateFPS()
+    {
+        frameCounter++;
+        if (Time.time - lastFPSCheckTime >= 1.0f)
+        {
+            currentFPS = frameCounter / (Time.time - lastFPSCheckTime);
+            frameCounter = 0;
+            lastFPSCheckTime = Time.time;
+        }
     }
 
     private void UpdateDiagnostics()
@@ -384,19 +1004,26 @@ public class PlayerSyncManager : MonoBehaviour
                     AverageRTT = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f,
                     BufferUnderflowCount = 0,
                     BufferOverflowCount = 0,
-                    LastUpdateTime = Time.time
+                    LastUpdateTime = Time.time,
+                    LastCorrectionDistance = 0f,
+                    CorrectionCount = 0,
+                    LastOverCorrectionDistance = 0f,
+                    OverCorrectionCount = 0,
+                    NoPacketFrames = 0,
+                    CurrentFPS = currentFPS,
+                    CurrentCorrectionStrength = baseCorrectionSmoothing,
+                    CurrentBaseInterpTime = baseInterpTime
                 };
             }
 
             var diagnostics = playerDiagnostics[id];
             float currentTime = Time.time;
 
-            // Check buffer state
             if (stateBuffers.ContainsKey(id))
             {
                 var buffer = stateBuffers[id];
                 float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f;
-                int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.2f));
+                int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.3f));
 
                 if (buffer.Count < minStateBufferSize)
                 {
@@ -408,13 +1035,19 @@ public class PlayerSyncManager : MonoBehaviour
                 }
             }
 
-            // Update average RTT
             if (estimatedRTT.ContainsKey(id))
             {
                 diagnostics.AverageRTT = Mathf.Lerp(diagnostics.AverageRTT, estimatedRTT[id], 0.1f);
             }
 
-            // Check for jitter (inconsistent velocity)
+            if (lastPacketTimes.ContainsKey(id))
+            {
+                float timeSinceLastPacket = currentTime - lastPacketTimes[id];
+                diagnostics.NoPacketFrames = Mathf.RoundToInt(timeSinceLastPacket / Time.deltaTime);
+            }
+
+            diagnostics.CurrentFPS = currentFPS;
+
             if (targetStates.ContainsKey(id) && currentStates.ContainsKey(id))
             {
                 var target = targetStates[id];
@@ -435,104 +1068,92 @@ public class PlayerSyncManager : MonoBehaviour
             playerDiagnostics[id] = diagnostics;
         }
 
-        // Update variable feedback based on diagnostics
-        UpdateVariableFeedback();
-    }
-
-    private void UpdateVariableFeedback()
-    {
-        // Reset feedback
-        foreach (var config in variableConfigs)
+        if (isDiagnosticsPanelActive)
         {
-            variableFeedback[config.Name] = ("None", Color.white, Color.gray, Color.gray);
-        }
-
-        foreach (var id in playerDiagnostics.Keys)
-        {
-            var diagnostics = playerDiagnostics[id];
-
-            // High desync count suggests positionTolerance or baseCorrectionSmoothing issues
-            if (diagnostics.DesyncCount > 5)
-            {
-                if (diagnostics.LastDesyncDistance > positionTolerance * 2f)
-                {
-                    variableFeedback["positionTolerance"] = ("Increase to reduce desync", Color.red, Color.green, Color.gray);
-                    variableFeedback["baseCorrectionSmoothing"] = ("Decrease for faster correction", Color.red, Color.gray, Color.green);
-                }
-                else
-                {
-                    variableFeedback["positionTolerance"] = ("Decrease for tighter sync", Color.red, Color.gray, Color.green);
-                }
-            }
-
-            // High jitter count suggests interpolation or velocity smoothing issues
-            if (diagnostics.JitterCount > 5)
-            {
-                variableFeedback["baseInterpTime"] = ("Increase for smoother interpolation", Color.red, Color.green, Color.gray);
-                variableFeedback["baseVelocitySmoothing"] = ("Increase for smoother velocity", Color.red, Color.green, Color.gray);
-            }
-
-            // Teleporting suggests teleportThreshold or desyncCorrectionTime issues
-            if (diagnostics.TeleportCount > 2)
-            {
-                variableFeedback["teleportThreshold"] = ("Increase to avoid teleports", Color.red, Color.green, Color.gray);
-                variableFeedback["desyncCorrectionTime"] = ("Decrease for faster correction", Color.red, Color.gray, Color.green);
-            }
-
-            // Buffer underflow suggests insufficient buffer size or update interval
-            if (diagnostics.BufferUnderflowCount > 5)
-            {
-                variableFeedback["minStateBufferSize"] = ("Increase to prevent underflow", Color.red, Color.green, Color.gray);
-                variableFeedback["updateInterval"] = ("Decrease for more frequent updates", Color.red, Color.gray, Color.green);
-            }
-
-            // Buffer overflow suggests excessive buffer size
-            if (diagnostics.BufferOverflowCount > 5)
-            {
-                variableFeedback["maxStateBufferSize"] = ("Decrease to prevent overflow", Color.red, Color.gray, Color.green);
-            }
-
-            // High RTT suggests increasing jitter buffer delay
-            if (diagnostics.AverageRTT > 0.15f)
-            {
-                variableFeedback["baseJitterBufferDelay"] = ("Increase for high latency", Color.red, Color.green, Color.gray);
-            }
-        }
-
-        if (isPanelActive)
-        {
-            UpdateVariableFeedbackUI();
+            UpdateDiagnosticsUI();
         }
     }
 
-    private void UpdateVariableFeedbackUI()
+    private void ApplyAutoAdjustments(int id, float desyncDistance)
     {
-        for (int i = 0; i < variableConfigs.Count; i++)
+        float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f;
+        var diagnostics = playerDiagnostics[id];
+
+        // Initialize auto-adjusted values
+        if (!autoAdjustedInterpTime.ContainsKey(id))
+            autoAdjustedInterpTime[id] = baseInterpTime;
+        if (!autoAdjustedCorrectionSmoothing.ContainsKey(id))
+            autoAdjustedCorrectionSmoothing[id] = baseCorrectionSmoothing;
+        if (!autoAdjustedPredictionFactor.ContainsKey(id))
+            autoAdjustedPredictionFactor[id] = basePredictionFactor;
+        if (!autoAdjustedVelocitySmoothing.ContainsKey(id))
+            autoAdjustedVelocitySmoothing[id] = baseVelocitySmoothing;
+
+        // Target values for auto-adjustments
+        float targetInterpTime = baseInterpTime;
+        float targetCorrectionSmoothing = baseCorrectionSmoothing;
+        float targetPredictionFactor = basePredictionFactor;
+        float targetVelocitySmoothing = baseVelocitySmoothing;
+        float targetJitterBufferDelay = is120Hz ? 0.008f : 0.016f;
+
+        // RTT > 150ms
+        if (rtt > AUTO_RTT_THRESHOLD)
         {
-            var config = variableConfigs[i];
-            var feedback = variableFeedback[config.Name];
+            targetInterpTime = baseInterpTime * 1.5f;
+            targetCorrectionSmoothing = baseCorrectionSmoothing * 1.3f;
+        }
 
-            // Update name field color
-            Text nameText = nameInputFields[i].GetComponentInChildren<Text>();
-            if (nameText != null)
-            {
-                nameText.color = feedback.NameColor;
-            }
+        // Desync > 1.5x tolerance
+        if (desyncDistance > positionTolerance * AUTO_DESYNC_MULTIPLIER * desyncToleranceMultiplier)
+        {
+            targetCorrectionSmoothing *= AUTO_CORRECTION_BOOST;
+            targetPredictionFactor = basePredictionFactor * 0.5f;
+        }
 
-            // Update plus button color
-            Image plusImage = plusButtons[i].GetComponent<Image>();
-            if (plusImage != null)
-            {
-                plusImage.color = feedback.PlusColor;
-            }
+        // FPS < 30
+        if (currentFPS < AUTO_FPS_THRESHOLD)
+        {
+            targetCorrectionSmoothing *= AUTO_SMOOTHING_REDUCTION;
+            targetInterpTime *= AUTO_SMOOTHING_REDUCTION;
+        }
 
-            // Update minus button color
-            Image minusImage = minusButtons[i].GetComponent<Image>();
-            if (minusImage != null)
+        // No packets in X frames
+        if (diagnostics.NoPacketFrames > AUTO_NO_PACKET_THRESHOLD)
+        {
+            if (otherPlayers.ContainsKey(id) && targetStates.ContainsKey(id))
             {
-                minusImage.color = feedback.MinusColor;
+                otherPlayers[id].transform.position = targetStates[id].Position;
+                otherPlayers[id].transform.rotation = Quaternion.Euler(0, 0, targetStates[id].Rotation);
+                currentStates[id] = targetStates[id];
+                diagnostics.TeleportCount++;
+                diagnostics.NoPacketFrames = 0;
+                playerDiagnostics[id] = diagnostics;
             }
         }
+
+        // Dynamic jitter buffer
+        float jitterBufferScale = Mathf.Lerp(1f, 2f, rtt / 0.3f);
+        targetJitterBufferDelay *= jitterBufferScale;
+
+        // Smooth transitions with Lerp
+        float smoothingSpeed = 5f; // Adjusts how quickly values converge
+        autoAdjustedInterpTime[id] = Mathf.Lerp(autoAdjustedInterpTime[id], targetInterpTime, Time.deltaTime * smoothingSpeed);
+        autoAdjustedCorrectionSmoothing[id] = Mathf.Lerp(autoAdjustedCorrectionSmoothing[id], targetCorrectionSmoothing, Time.deltaTime * smoothingSpeed);
+        autoAdjustedPredictionFactor[id] = Mathf.Lerp(autoAdjustedPredictionFactor[id], targetPredictionFactor, Time.deltaTime * smoothingSpeed);
+        autoAdjustedVelocitySmoothing[id] = Mathf.Lerp(autoAdjustedVelocitySmoothing[id], targetVelocitySmoothing, Time.deltaTime * smoothingSpeed);
+        baseJitterBufferDelay = Mathf.Lerp(baseJitterBufferDelay, targetJitterBufferDelay, Time.deltaTime * smoothingSpeed);
+
+        // Clamp dynamic values
+        autoAdjustedInterpTime[id] = Mathf.Clamp(autoAdjustedInterpTime[id], minInterpTime, baseInterpTime * 2f);
+        autoAdjustedCorrectionSmoothing[id] = Mathf.Clamp(autoAdjustedCorrectionSmoothing[id], 0.1f, 2f);
+        autoAdjustedPredictionFactor[id] = Mathf.Clamp(autoAdjustedPredictionFactor[id], 0.01f, basePredictionFactor * 1.5f);
+        autoAdjustedVelocitySmoothing[id] = Mathf.Clamp(autoAdjustedVelocitySmoothing[id], 0.1f, baseVelocitySmoothing * 1.5f);
+        baseJitterBufferDelay = Mathf.Clamp(baseJitterBufferDelay, 0.004f, 0.1f);
+
+        // Update diagnostics with current auto-tuner values
+        diagnostics.CurrentCorrectionStrength = autoAdjustedCorrectionSmoothing[id];
+        diagnostics.CurrentBaseInterpTime = autoAdjustedInterpTime[id];
+        playerDiagnostics[id] = diagnostics;
     }
 
     private void UpdateLocalPlayerMovement()
@@ -691,10 +1312,10 @@ public class PlayerSyncManager : MonoBehaviour
             if (!stateBuffers.ContainsKey(id) || stateBuffers[id].Count < 2) continue;
 
             var buffer = stateBuffers[id];
-            float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : baseJitterBufferDelay;
+            float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f;
             float jitterBufferDelay = Mathf.Clamp(baseJitterBufferDelay * (rtt / 0.08f), 0.01f, 0.1f);
 
-            int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.2f));
+            int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.3f));
             while (buffer.Count > targetBufferSize)
             {
                 buffer.Dequeue();
@@ -713,14 +1334,14 @@ public class PlayerSyncManager : MonoBehaviour
             var current = currentStates[id];
 
             float serverTimeNow = Time.time + GameNetworkManager.Instance.serverTimeOffset;
-            float interpTime = Mathf.Clamp(rtt * 0.5f, minInterpTime, baseInterpTime * (rtt / 0.08f));
+            float interpTime = Mathf.Clamp(rtt * 0.5f, minInterpTime, autoAdjustedInterpTime[id] * (rtt / 0.08f));
             float t = Mathf.Clamp01((serverTimeNow - target.ServerTimestamp) / interpTime);
 
-            float predictionFactor = Mathf.Lerp(basePredictionFactor * 0.5f, basePredictionFactor, rtt / 0.2f);
-            float predictionTime = Mathf.Min(interpTime * predictionFactor, extrapolationLimiter);
+            float predictionFactor = Mathf.Lerp(autoAdjustedPredictionFactor[id] * 0.5f, autoAdjustedPredictionFactor[id], rtt / 0.2f) * predictionAdjustmentFactor;
+            float predictionTime = Mathf.Min(interpTime * predictionFactor, Mathf.Min(extrapolationLimiter, maxExtrapolationTime));
             Vector3 predictedPos = target.Position + Vector3.ClampMagnitude(target.Velocity, maxVelocity) * predictionTime;
 
-            float correctionSmoothing = Mathf.Lerp(baseCorrectionSmoothing * 0.5f, baseCorrectionSmoothing * 1.5f, rtt / 0.2f);
+            float correctionSmoothing = Mathf.Lerp(autoAdjustedCorrectionSmoothing[id] * 0.5f, autoAdjustedCorrectionSmoothing[id] * 1.5f, rtt / 0.2f) * correctionAggressiveness;
             Vector3 newPos = Vector3.Lerp(current.Position, predictedPos, t);
 
             float rotationT = t * rotationDamping;
@@ -733,12 +1354,11 @@ public class PlayerSyncManager : MonoBehaviour
             Vector3 currentPos = otherPlayers[id].transform.position;
             float desyncDistance = Vector3.Distance(currentPos, newPos);
 
-            // Update diagnostics for desync and teleport
             if (playerDiagnostics.ContainsKey(id))
             {
                 var diagnostics = playerDiagnostics[id];
                 diagnostics.LastDesyncDistance = desyncDistance;
-                if (desyncDistance > positionTolerance)
+                if (desyncDistance > positionTolerance * desyncToleranceMultiplier)
                 {
                     diagnostics.DesyncCount++;
                 }
@@ -749,18 +1369,41 @@ public class PlayerSyncManager : MonoBehaviour
                 playerDiagnostics[id] = diagnostics;
             }
 
+            ApplyAutoAdjustments(id, desyncDistance);
+
             if (desyncDistance > teleportThreshold)
             {
                 newPos = predictedPos;
                 otherPlayers[id].transform.rotation = Quaternion.Euler(0, 0, target.Rotation);
                 currentStates[id] = target;
             }
-            else if (desyncDistance > 0.2f)
+            else if (desyncDistance > maxCorrectionDistance)
             {
-                newPos = Vector3.Lerp(currentPos, newPos, correctionSmoothing);
+                Vector3 correctionVector = predictedPos - currentPos;
+                float correctionDistance = correctionVector.magnitude;
+                Vector3 correctionDir = correctionVector.normalized;
+                float correctionAmount = Mathf.Min(correctionDistance, maxCorrectionSpeed * Time.deltaTime);
+                newPos = currentPos + correctionDir * correctionAmount * correctionSmoothing;
+
+                if (playerDiagnostics.ContainsKey(id))
+                {
+                    var diagnostics = playerDiagnostics[id];
+                    diagnostics.LastCorrectionDistance = correctionAmount;
+                    diagnostics.CorrectionCount++;
+                    if (correctionDistance > overCorrectionThreshold)
+                    {
+                        diagnostics.LastOverCorrectionDistance = correctionDistance;
+                        diagnostics.OverCorrectionCount++;
+                    }
+                    playerDiagnostics[id] = diagnostics;
+                }
+            }
+            else if (desyncDistance > positionTolerance * desyncToleranceMultiplier)
+            {
+                newPos = Vector3.Lerp(currentPos, newPos, correctionSmoothing * correctionDamping);
             }
 
-            if (desyncDistance > positionTolerance)
+            if (desyncDistance > positionTolerance * desyncToleranceMultiplier)
             {
                 if (!lastDesyncTimes.ContainsKey(id))
                 {
@@ -768,10 +1411,25 @@ public class PlayerSyncManager : MonoBehaviour
                 }
                 else if (Time.time - lastDesyncTimes[id] > desyncCorrectionTime)
                 {
-                    newPos = predictedPos;
-                    otherPlayers[id].transform.rotation = Quaternion.Euler(0, 0, target.Rotation);
-                    currentStates[id] = target;
-                    lastDesyncTimes[id] = Time.time;
+                    if (!lastCorrectionTimes.ContainsKey(id) || Time.time - lastCorrectionTimes[id] > reCorrectionDelay)
+                    {
+                        if (desyncDistance > reCorrectionThreshold)
+                        {
+                            newPos = predictedPos;
+                            otherPlayers[id].transform.position = predictedPos;
+                            currentStates[id] = target;
+                            lastDesyncTimes[id] = Time.time;
+                            lastCorrectionTimes[id] = Time.time;
+
+                            if (playerDiagnostics.ContainsKey(id))
+                            {
+                                var diagnostics = playerDiagnostics[id];
+                                diagnostics.LastCorrectionDistance = desyncDistance;
+                                diagnostics.CorrectionCount++;
+                                playerDiagnostics[id] = diagnostics;
+                            }
+                        }
+                    }
                 }
             }
             else
@@ -815,7 +1473,7 @@ public class PlayerSyncManager : MonoBehaviour
     public void CorrectPosition(GameObject localPlayer, Vector3 serverPosition, float serverRotation)
     {
         if (Time.time - spawnTime < initialCorrectGracePeriod &&
-            Vector3.Distance(serverPosition, playerPosition) < positionTolerance &&
+            Vector3.Distance(serverPosition, playerPosition) < positionTolerance * desyncToleranceMultiplier &&
             Mathf.Abs(serverRotation - playerRotation) < rotationTolerance)
         {
             return;
@@ -835,19 +1493,18 @@ public class PlayerSyncManager : MonoBehaviour
             pendingMoves.Clear();
             lastServerRejectionTime = Time.time;
         }
-        else if (desyncDistance > positionTolerance ||
+        else if (desyncDistance > positionTolerance * desyncToleranceMultiplier ||
                  Mathf.Abs(serverRotation - playerRotation) > rotationTolerance)
         {
-            StartCoroutine(LerpToServerPosition(localPlayer, serverPosition, serverRotation));
+            StartCoroutine(LerpToServerPosition(localPlayer, serverPosition, serverRotation, desyncDistance));
             lastServerRejectionTime = Time.time;
             pendingMoves.Clear();
         }
     }
 
-    private IEnumerator LerpToServerPosition(GameObject localPlayer, Vector3 targetPosition, float targetRotation)
+    private IEnumerator LerpToServerPosition(GameObject localPlayer, Vector3 targetPosition, float targetRotation, float desyncDistance)
     {
-        float distance = Vector3.Distance(playerPosition, targetPosition);
-        float lerpTime = Mathf.Clamp(distance * 0.05f, 0.02f, 0.02f);
+        float lerpTime = Mathf.Clamp(desyncDistance * 0.05f, 0.02f, 0.2f) / correctionAggressiveness;
         float elapsed = 0f;
         Vector3 startPosition = playerPosition;
         Quaternion startRotation = Quaternion.Euler(0f, 0f, playerRotation);
@@ -857,6 +1514,7 @@ public class PlayerSyncManager : MonoBehaviour
         {
             elapsed += Time.deltaTime;
             float t = elapsed / lerpTime;
+            t = t * t * (3f - 2f * t); // Smoothstep
             playerPosition = Vector3.Lerp(startPosition, targetPosition, t);
             playerRotation = Quaternion.Slerp(startRotation, targetRotationQuat, t).eulerAngles.z;
             localPlayer.transform.position = playerPosition;
@@ -894,7 +1552,12 @@ public class PlayerSyncManager : MonoBehaviour
         }
 
         float rtt = estimatedRTT.ContainsKey(id) ? estimatedRTT[id] : 0.08f;
-        float velocitySmoothing = Mathf.Lerp(baseVelocitySmoothing * 0.5f, baseVelocitySmoothing * 1.5f, rtt / 0.2f);
+        float velocitySmoothing = Mathf.Lerp(
+            autoAdjustedVelocitySmoothing.ContainsKey(id) ? autoAdjustedVelocitySmoothing[id] * 0.5f : baseVelocitySmoothing * 0.5f,
+            autoAdjustedVelocitySmoothing.ContainsKey(id) ? autoAdjustedVelocitySmoothing[id] * 1.5f : baseVelocitySmoothing * 1.5f,
+            rtt / 0.2f);
+        velocitySmoothing = Mathf.Clamp(velocitySmoothing, 0.1f, baseVelocitySmoothing * 1.5f); // Clamp dynamic value
+
         Vector3 velocity = Vector3.zero;
         if (targetStates.ContainsKey(id))
         {
@@ -906,7 +1569,6 @@ public class PlayerSyncManager : MonoBehaviour
                 rawVelocity = Vector3.ClampMagnitude(rawVelocity, maxVelocity);
                 velocity = Vector3.Lerp(lastState.Velocity, rawVelocity, 1f - velocityPredictionDamping);
 
-                // Detect jitter
                 if (playerDiagnostics.ContainsKey(id))
                 {
                     var diagnostics = playerDiagnostics[id];
@@ -946,7 +1608,7 @@ public class PlayerSyncManager : MonoBehaviour
         }
         stateBuffers[id].Enqueue(newState);
 
-        int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.2f));
+        int targetBufferSize = Mathf.RoundToInt(Mathf.Lerp(minStateBufferSize, maxStateBufferSize, rtt / 0.3f));
         while (stateBuffers[id].Count > targetBufferSize)
         {
             stateBuffers[id].Dequeue();
@@ -1040,7 +1702,6 @@ public class PlayerSyncManager : MonoBehaviour
         estimatedRTT[id] = 0.08f;
         lastPacketTimes[id] = Time.time;
 
-        // Initialize diagnostics
         playerDiagnostics[id] = new PlayerDiagnostics
         {
             LastDesyncDistance = 0f,
@@ -1051,8 +1712,22 @@ public class PlayerSyncManager : MonoBehaviour
             AverageRTT = 0.08f,
             BufferUnderflowCount = 0,
             BufferOverflowCount = 0,
-            LastUpdateTime = Time.time
+            LastUpdateTime = Time.time,
+            LastCorrectionDistance = 0f,
+            CorrectionCount = 0,
+            LastOverCorrectionDistance = 0f,
+            OverCorrectionCount = 0,
+            NoPacketFrames = 0,
+            CurrentFPS = currentFPS,
+            CurrentCorrectionStrength = baseCorrectionSmoothing,
+            CurrentBaseInterpTime = baseInterpTime
         };
+
+        // Initialize auto-adjusted values
+        autoAdjustedInterpTime[id] = baseInterpTime;
+        autoAdjustedCorrectionSmoothing[id] = baseCorrectionSmoothing;
+        autoAdjustedPredictionFactor[id] = basePredictionFactor;
+        autoAdjustedVelocitySmoothing[id] = baseVelocitySmoothing;
     }
 
     public void RemoveOtherPlayer(int id)
@@ -1064,7 +1739,12 @@ public class PlayerSyncManager : MonoBehaviour
         estimatedRTT.Remove(id);
         lastPacketTimes.Remove(id);
         lastDesyncTimes.Remove(id);
+        lastCorrectionTimes.Remove(id);
         playerDiagnostics.Remove(id);
+        autoAdjustedInterpTime.Remove(id);
+        autoAdjustedCorrectionSmoothing.Remove(id);
+        autoAdjustedPredictionFactor.Remove(id);
+        autoAdjustedVelocitySmoothing.Remove(id);
     }
 
     public IEnumerable<int> GetOtherPlayerIDs()
