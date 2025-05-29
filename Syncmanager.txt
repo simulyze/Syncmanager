@@ -132,8 +132,6 @@ public class PlayerSyncManager : MonoBehaviour
     {
         public string Name;
         public float DefaultValue;
-        public float MinValue;
-        public float MaxValue;
         public float Increment;
         public Action<float> Setter;
         public Func<float> Getter;
@@ -262,28 +260,28 @@ public class PlayerSyncManager : MonoBehaviour
 
         lowLevelVariableConfigs1 = new List<VariableConfig>
         {
-            new VariableConfig { Name = "updateInterval", DefaultValue = 0.0083f, MinValue = 0.0001f, MaxValue = 1.0f, Increment = 0.0001f, Setter = v => updateInterval = v, Getter = () => updateInterval },
-            new VariableConfig { Name = "positionTolerance", DefaultValue = 0.015f, MinValue = 0.0001f, MaxValue = 10.0f, Increment = 0.001f, Setter = v => positionTolerance = v, Getter = () => positionTolerance },
-            new VariableConfig { Name = "rotationTolerance", DefaultValue = 0.4f, MinValue = 0.001f, MaxValue = 180.0f, Increment = 0.01f, Setter = v => rotationTolerance = v, Getter = () => rotationTolerance },
-            new VariableConfig { Name = "teleportThreshold", DefaultValue = 2.0f, MinValue = 0.01f, MaxValue = 100.0f, Increment = 0.1f, Setter = v => teleportThreshold = v, Getter = () => teleportThreshold },
-            new VariableConfig { Name = "initialMoveDelay", DefaultValue = 0.04f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.001f, Setter = v => initialMoveDelay = v, Getter = () => initialMoveDelay },
-            new VariableConfig { Name = "initialCorrectGracePeriod", DefaultValue = 0.05f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.001f, Setter = v => initialCorrectGracePeriod = v, Getter = () => initialCorrectGracePeriod },
-            new VariableConfig { Name = "movementThreshold", DefaultValue = 0.002f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.0001f, Setter = v => movementThreshold = v, Getter = () => movementThreshold },
-            new VariableConfig { Name = "minMoveDistance", DefaultValue = 0.0015f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.0001f, Setter = v => minMoveDistance = v, Getter = () => minMoveDistance },
-            new VariableConfig { Name = "minRotationAngle", DefaultValue = 0.08f, MinValue = 0.0f, MaxValue = 360.0f, Increment = 0.01f, Setter = v => minRotationAngle = v, Getter = () => minRotationAngle },
-            new VariableConfig { Name = "inputSmoothing", DefaultValue = 0.18f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => inputSmoothing = v, Getter = () => inputSmoothing },
-            new VariableConfig { Name = "baseInterpTime", DefaultValue = 0.048f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.001f, Setter = v => baseInterpTime = v, Getter = () => baseInterpTime },
-            new VariableConfig { Name = "minInterpTime", DefaultValue = 0.01f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.001f, Setter = v => minInterpTime = v, Getter = () => minInterpTime },
-            new VariableConfig { Name = "rotationDamping", DefaultValue = 0.95f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => rotationDamping = v, Getter = () => rotationDamping },
-            new VariableConfig { Name = "basePredictionFactor", DefaultValue = 0.16f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => basePredictionFactor = v, Getter = () => basePredictionFactor },
-            new VariableConfig { Name = "baseVelocitySmoothing", DefaultValue = 0.29f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => baseVelocitySmoothing = v, Getter = () => baseVelocitySmoothing },
-            new VariableConfig { Name = "velocityPredictionDamping", DefaultValue = 0.5f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => velocityPredictionDamping = v, Getter = () => velocityPredictionDamping },
-            new VariableConfig { Name = "extrapolationLimiter", DefaultValue = 0.2f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => extrapolationLimiter = v, Getter = () => extrapolationLimiter },
-            new VariableConfig { Name = "baseCorrectionSmoothing", DefaultValue = 0.88f, MinValue = 0.0f, MaxValue = 100.0f, Increment = 0.01f, Setter = v => baseCorrectionSmoothing = v, Getter = () => baseCorrectionSmoothing },
-            new VariableConfig { Name = "desyncCorrectionTime", DefaultValue = 0.25f, MinValue = 0.0f, MaxValue = 10.0f, Increment = 0.01f, Setter = v => desyncCorrectionTime = v, Getter = () => desyncCorrectionTime },
-            new VariableConfig { Name = "baseJitterBufferDelay", DefaultValue = 0.008f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.001f, Setter = v => baseJitterBufferDelay = v, Getter = () => baseJitterBufferDelay },
-            new VariableConfig { Name = "minStateBufferSize", DefaultValue = 3f, MinValue = 0f, MaxValue = 100f, Increment = 1f, Setter = v => minStateBufferSize = v, Getter = () => minStateBufferSize },
-            new VariableConfig { Name = "maxStateBufferSize", DefaultValue = 5f, MinValue = 0f, MaxValue = 1000f, Increment = 1f, Setter = v => maxStateBufferSize = v, Getter = () => maxStateBufferSize }
+            new VariableConfig { Name = "updateInterval", DefaultValue = 0.0083f, Increment = 0.0001f, Setter = v => updateInterval = v, Getter = () => updateInterval },
+            new VariableConfig { Name = "positionTolerance", DefaultValue = 0.015f, Increment = 0.001f, Setter = v => positionTolerance = v, Getter = () => positionTolerance },
+            new VariableConfig { Name = "rotationTolerance", DefaultValue = 0.4f, Increment = 0.01f, Setter = v => rotationTolerance = v, Getter = () => rotationTolerance },
+            new VariableConfig { Name = "teleportThreshold", DefaultValue = 2.0f, Increment = 0.1f, Setter = v => teleportThreshold = v, Getter = () => teleportThreshold },
+            new VariableConfig { Name = "initialMoveDelay", DefaultValue = 0.04f, Increment = 0.001f, Setter = v => initialMoveDelay = v, Getter = () => initialMoveDelay },
+            new VariableConfig { Name = "initialCorrectGracePeriod", DefaultValue = 0.05f, Increment = 0.001f, Setter = v => initialCorrectGracePeriod = v, Getter = () => initialCorrectGracePeriod },
+            new VariableConfig { Name = "movementThreshold", DefaultValue = 0.002f, Increment = 0.0001f, Setter = v => movementThreshold = v, Getter = () => movementThreshold },
+            new VariableConfig { Name = "minMoveDistance", DefaultValue = 0.0015f, Increment = 0.0001f, Setter = v => minMoveDistance = v, Getter = () => minMoveDistance },
+            new VariableConfig { Name = "minRotationAngle", DefaultValue = 0.08f, Increment = 0.01f, Setter = v => minRotationAngle = v, Getter = () => minRotationAngle },
+            new VariableConfig { Name = "inputSmoothing", DefaultValue = 0.18f, Increment = 0.01f, Setter = v => inputSmoothing = v, Getter = () => inputSmoothing },
+            new VariableConfig { Name = "baseInterpTime", DefaultValue = 0.048f, Increment = 0.001f, Setter = v => baseInterpTime = v, Getter = () => baseInterpTime },
+            new VariableConfig { Name = "minInterpTime", DefaultValue = 0.01f, Increment = 0.001f, Setter = v => minInterpTime = v, Getter = () => minInterpTime },
+            new VariableConfig { Name = "rotationDamping", DefaultValue = 0.95f, Increment = 0.01f, Setter = v => rotationDamping = v, Getter = () => rotationDamping },
+            new VariableConfig { Name = "basePredictionFactor", DefaultValue = 0.16f, Increment = 0.01f, Setter = v => basePredictionFactor = v, Getter = () => basePredictionFactor },
+            new VariableConfig { Name = "baseVelocitySmoothing", DefaultValue = 0.29f, Increment = 0.01f, Setter = v => baseVelocitySmoothing = v, Getter = () => baseVelocitySmoothing },
+            new VariableConfig { Name = "velocityPredictionDamping", DefaultValue = 0.5f, Increment = 0.01f, Setter = v => velocityPredictionDamping = v, Getter = () => velocityPredictionDamping },
+            new VariableConfig { Name = "extrapolationLimiter", DefaultValue = 0.2f, Increment = 0.01f, Setter = v => extrapolationLimiter = v, Getter = () => extrapolationLimiter },
+            new VariableConfig { Name = "baseCorrectionSmoothing", DefaultValue = 0.88f, Increment = 0.01f, Setter = v => baseCorrectionSmoothing = v, Getter = () => baseCorrectionSmoothing },
+            new VariableConfig { Name = "desyncCorrectionTime", DefaultValue = 0.25f, Increment = 0.01f, Setter = v => desyncCorrectionTime = v, Getter = () => desyncCorrectionTime },
+            new VariableConfig { Name = "baseJitterBufferDelay", DefaultValue = 0.008f, Increment = 0.001f, Setter = v => baseJitterBufferDelay = v, Getter = () => baseJitterBufferDelay },
+            new VariableConfig { Name = "minStateBufferSize", DefaultValue = 3f, Increment = 1f, Setter = v => minStateBufferSize = v, Getter = () => minStateBufferSize },
+            new VariableConfig { Name = "maxStateBufferSize", DefaultValue = 5f, Increment = 1f, Setter = v => maxStateBufferSize = v, Getter = () => maxStateBufferSize }
         };
 
         foreach (Transform child in contentParent1)
@@ -325,7 +323,6 @@ public class PlayerSyncManager : MonoBehaviour
             {
                 if (float.TryParse(value, out float newValue))
                 {
-                    newValue = Mathf.Clamp(newValue, config.MinValue, config.MaxValue);
                     config.Setter(newValue);
                     valueField.text = newValue.ToString("F4");
                 }
@@ -344,14 +341,14 @@ public class PlayerSyncManager : MonoBehaviour
             plusButton.onClick.AddListener(() =>
             {
                 float current = config.Getter();
-                float newValue = Mathf.Clamp(current + config.Increment, config.MinValue, config.MaxValue);
+                float newValue = current + config.Increment;
                 config.Setter(newValue);
                 valueField.text = newValue.ToString("F4");
             });
             minusButton.onClick.AddListener(() =>
             {
                 float current = config.Getter();
-                float newValue = Mathf.Clamp(current - config.Increment, config.MinValue, config.MaxValue);
+                float newValue = current - config.Increment;
                 config.Setter(newValue);
                 valueField.text = newValue.ToString("F4");
             });
@@ -402,10 +399,10 @@ public class PlayerSyncManager : MonoBehaviour
 
         lowLevelVariableConfigs2 = new List<VariableConfig>
         {
-            new VariableConfig { Name = "maxCorrectionSpeed", DefaultValue = 5.0f, MinValue = 0.1f, MaxValue = 20.0f, Increment = 0.1f, Setter = v => maxCorrectionSpeed = v, Getter = () => maxCorrectionSpeed },
-            new VariableConfig { Name = "correctionDamping", DefaultValue = 0.9f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => correctionDamping = v, Getter = () => correctionDamping },
-            new VariableConfig { Name = "reCorrectionDelay", DefaultValue = 0.5f, MinValue = 0.0f, MaxValue = 5.0f, Increment = 0.01f, Setter = v => reCorrectionDelay = v, Getter = () => reCorrectionDelay },
-            new VariableConfig { Name = "maxExtrapolationTime", DefaultValue = 0.1f, MinValue = 0.01f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => maxExtrapolationTime = v, Getter = () => maxExtrapolationTime }
+            new VariableConfig { Name = "maxCorrectionSpeed", DefaultValue = 5.0f, Increment = 0.1f, Setter = v => maxCorrectionSpeed = v, Getter = () => maxCorrectionSpeed },
+            new VariableConfig { Name = "correctionDamping", DefaultValue = 0.9f, Increment = 0.01f, Setter = v => correctionDamping = v, Getter = () => correctionDamping },
+            new VariableConfig { Name = "reCorrectionDelay", DefaultValue = 0.5f, Increment = 0.01f, Setter = v => reCorrectionDelay = v, Getter = () => reCorrectionDelay },
+            new VariableConfig { Name = "maxExtrapolationTime", DefaultValue = 0.1f, Increment = 0.01f, Setter = v => maxExtrapolationTime = v, Getter = () => maxExtrapolationTime }
         };
 
         foreach (Transform child in lowLevel2ContentParent)
@@ -447,7 +444,6 @@ public class PlayerSyncManager : MonoBehaviour
             {
                 if (float.TryParse(value, out float newValue))
                 {
-                    newValue = Mathf.Clamp(newValue, config.MinValue, config.MaxValue);
                     config.Setter(newValue);
                     valueField.text = newValue.ToString("F4");
                 }
@@ -466,14 +462,14 @@ public class PlayerSyncManager : MonoBehaviour
             plusButton.onClick.AddListener(() =>
             {
                 float current = config.Getter();
-                float newValue = Mathf.Clamp(current + config.Increment, config.MinValue, config.MaxValue);
+                float newValue = current + config.Increment;
                 config.Setter(newValue);
                 valueField.text = newValue.ToString("F4");
             });
             minusButton.onClick.AddListener(() =>
             {
                 float current = config.Getter();
-                float newValue = Mathf.Clamp(current - config.Increment, config.MinValue, config.MaxValue);
+                float newValue = current - config.Increment;
                 config.Setter(newValue);
                 valueField.text = newValue.ToString("F4");
             });
@@ -524,12 +520,12 @@ public class PlayerSyncManager : MonoBehaviour
 
         highLevelVariableConfigs = new List<VariableConfig>
         {
-            new VariableConfig { Name = "maxCorrectionDistance", DefaultValue = 1.0f, MinValue = 0.1f, MaxValue = 10.0f, Increment = 0.1f, Setter = v => maxCorrectionDistance = v, Getter = () => maxCorrectionDistance },
-            new VariableConfig { Name = "overCorrectionThreshold", DefaultValue = 0.5f, MinValue = 0.01f, MaxValue = 5.0f, Increment = 0.01f, Setter = v => overCorrectionThreshold = v, Getter = () => overCorrectionThreshold },
-            new VariableConfig { Name = "reCorrectionThreshold", DefaultValue = 0.3f, MinValue = 0.01f, MaxValue = 5.0f, Increment = 0.01f, Setter = v => reCorrectionThreshold = v, Getter = () => reCorrectionThreshold },
-            new VariableConfig { Name = "correctionAggressiveness", DefaultValue = 0.7f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => correctionAggressiveness = v, Getter = () => correctionAggressiveness },
-            new VariableConfig { Name = "predictionAdjustmentFactor", DefaultValue = 0.2f, MinValue = 0.0f, MaxValue = 1.0f, Increment = 0.01f, Setter = v => predictionAdjustmentFactor = v, Getter = () => predictionAdjustmentFactor },
-            new VariableConfig { Name = "desyncToleranceMultiplier", DefaultValue = 1.5f, MinValue = 0.1f, MaxValue = 5.0f, Increment = 0.1f, Setter = v => desyncToleranceMultiplier = v, Getter = () => desyncToleranceMultiplier }
+            new VariableConfig { Name = "maxCorrectionDistance", DefaultValue = 1.0f, Increment = 0.1f, Setter = v => maxCorrectionDistance = v, Getter = () => maxCorrectionDistance },
+            new VariableConfig { Name = "overCorrectionThreshold", DefaultValue = 0.5f, Increment = 0.01f, Setter = v => overCorrectionThreshold = v, Getter = () => overCorrectionThreshold },
+            new VariableConfig { Name = "reCorrectionThreshold", DefaultValue = 0.3f, Increment = 0.01f, Setter = v => reCorrectionThreshold = v, Getter = () => reCorrectionThreshold },
+            new VariableConfig { Name = "correctionAggressiveness", DefaultValue = 0.7f, Increment = 0.01f, Setter = v => correctionAggressiveness = v, Getter = () => correctionAggressiveness },
+            new VariableConfig { Name = "predictionAdjustmentFactor", DefaultValue = 0.2f, Increment = 0.01f, Setter = v => predictionAdjustmentFactor = v, Getter = () => predictionAdjustmentFactor },
+            new VariableConfig { Name = "desyncToleranceMultiplier", DefaultValue = 1.5f, Increment = 0.1f, Setter = v => desyncToleranceMultiplier = v, Getter = () => desyncToleranceMultiplier }
         };
 
         foreach (Transform child in highLevelContentParent)
@@ -571,7 +567,6 @@ public class PlayerSyncManager : MonoBehaviour
             {
                 if (float.TryParse(value, out float newValue))
                 {
-                    newValue = Mathf.Clamp(newValue, config.MinValue, config.MaxValue);
                     config.Setter(newValue);
                     valueField.text = newValue.ToString("F4");
                 }
@@ -590,14 +585,14 @@ public class PlayerSyncManager : MonoBehaviour
             plusButton.onClick.AddListener(() =>
             {
                 float current = config.Getter();
-                float newValue = Mathf.Clamp(current + config.Increment, config.MinValue, config.MaxValue);
+                float newValue = current + config.Increment;
                 config.Setter(newValue);
                 valueField.text = newValue.ToString("F4");
             });
             minusButton.onClick.AddListener(() =>
             {
                 float current = config.Getter();
-                float newValue = Mathf.Clamp(current - config.Increment, config.MinValue, config.MaxValue);
+                float newValue = current - config.Increment;
                 config.Setter(newValue);
                 valueField.text = newValue.ToString("F4");
             });
@@ -691,7 +686,7 @@ public class PlayerSyncManager : MonoBehaviour
                 float sensitivity = 50f;
                 float change = dragDistance / sensitivity * config.Increment;
                 float currentValue = config.Getter();
-                float newValue = Mathf.Clamp(currentValue + change, config.MinValue, config.MaxValue);
+                float newValue = currentValue + change;
                 config.Setter(newValue);
                 valueField.text = newValue.ToString("F4");
                 dragStartPosition = currentPosition;
